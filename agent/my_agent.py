@@ -196,6 +196,62 @@ std::vector<Box> components(const Grid& g, const std::set<int>& bg, std::vector<
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Knowing when we are going in circles.
+//
+// The frame carries a remaining-actions bar that advances every step whatever
+// we do, so raw frames are never equal and "have I been here before?" cannot be
+// answered by comparing them. We find those clock cells the same way the
+// offline solver does - cells that change on nearly every step - blank them,
+// and hash what is left. Repeats of the same hash mean the current strategy has
+// stopped producing anything and it is time to try a different kind of action.
+// ---------------------------------------------------------------------------
+struct NoveltyIndex {
+  std::array<int, NCELL> changes;  // per-cell change count
+  int observations;
+  std::map<uint64_t, int> seen;
+
+  NoveltyIndex() : observations(0) { changes.fill(0); }
+
+  void note_change(const Grid& a, const Grid& b) {
+    for (int i = 0; i < NCELL; ++i)
+      if (a.c[i] != b.c[i]) ++changes[i];
+    ++observations;
+  }
+
+  bool is_clock(int i) const {
+    // Needs enough evidence before we start blanking anything.
+    return observations >= 24 && changes[i] * 10 >= observations * 9;
+  }
+
+  uint64_t hash(const Grid& g, int levels) const {
+    uint64_t h = 1469598103934665603ULL ^ uint64_t(levels) * 1099511628211ULL;
+    for (int i = 0; i < NCELL; ++i) {
+      uint8_t v = is_clock(i) ? 0 : uint8_t(g.c[i]);
+      h ^= v;
+      h *= 1099511628211ULL;
+    }
+    return h;
+  }
+
+  // How many times we have been in this state before.
+  int visit(const Grid& g, int levels) { return seen[hash(g, levels)]++; }
+};
+
+// One issued action, so a route through a level can be replayed.
+struct Act {
+  int a, x, y;
+  Act() : a(0), x(0), y(0) {}
+  Act(int a_, int x_, int y_) : a(a_), x(x_), y(y_) {}
+};
+
+// A state we reached inside the current level, and the cheapest way back to it.
+struct ArcEntry {
+  std::vector<Act> traj;
+  int visits;
+  ArcEntry() : visits(0) {}
+};
+
 // A translation of one colour between two frames.
 struct Motion {
   int color;
@@ -311,9 +367,15 @@ struct Agent {
   int last_action;
   int pending_x, pending_y;
 
-  // What immediately preceded the last level completion.
+  // What immediately preceded the last level completion. Levels of one game
+  // share their mechanics, so the move that finished level 1 is the strongest
+  // hint available for level 2 - and level 2 is worth twice as much, because
+  // the per-game score weights a level by its number.
+  enum { TRIG_NONE = 0, TRIG_STAND = 1, TRIG_CLICK = 2 };
+  int trigger_kind;
   int trigger_action;
-  int trigger_under;
+  int trigger_under;     // TRIG_STAND: colour the avatar was standing on
+  int trig_col, trig_area, trig_w, trig_h;   // TRIG_CLICK: what we clicked
   bool trigger_valid;
   int last_under;
 
@@ -321,13 +383,30 @@ struct Agent {
   int blocked_marks;
   int reacquire;  // countdown of probe moves used to find the avatar again
 
+  NoveltyIndex novelty;
+  int repeats;    // consecutive choices made from an already-seen state
+  int escalation; // 0 walk, 1 interact everywhere, 2 click, 3 restart the level
+
+  // Go-Explore inside the current level. RESET restarts the level and keeps the
+  // levels already finished, so "go back to a promising state and try again" is
+  // available even here, where there is no simulator to fork - we pay for it in
+  // real actions by replaying the route.
+  int last_state;                             // 0 not played, 1 playing, 2 win, 3 over
+  std::vector<Act> level_traj;                // actions since this level began
+  std::map<uint64_t, ArcEntry> level_archive;
+  std::vector<Act> replay_queue;
+  bool replaying;
+  int restarts;
+
   Agent()
       : rng(12345), has6(false), have_prev(false), steps(0), levels(0),
         av_color(-1), av_w(0), av_h(0), av_support(0), avatar_known(false),
         ax(-1), ay(-1), expect_valid(false), expect_x(-1), expect_y(-1),
         last_action(-1), pending_x(0), pending_y(0),
-        trigger_action(-1), trigger_under(-1), trigger_valid(false),
-        last_under(-1), stagnant(0), blocked_marks(0), reacquire(0) {
+        trigger_kind(TRIG_NONE), trigger_action(-1), trigger_under(-1),
+        trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
+        last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
+        repeats(0), escalation(0), last_state(0), replaying(false), restarts(0) {
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
@@ -463,6 +542,47 @@ struct Agent {
     for (size_t i = 0; i < cells.size(); ++i) touched[cells[i]] = 1;
   }
 
+  // Layout-specific knowledge only; the action model and the winning trigger
+  // survive, because they describe the game rather than this particular level.
+  void forget_map() {
+    known.fill(UNKNOWN);
+    visited.fill(0);
+    probed5.fill(0);
+    touched.fill(0);
+    clicked.clear();
+    plan.clear();
+    ax = ay = -1;
+    expect_valid = false;
+    reacquire = int(avail.size()) * 2;
+  }
+
+  // Pick somewhere worth going back to: rarely revisited, and cheap to reach.
+  const ArcEntry* restart_target() {
+    const ArcEntry* best = 0;
+    double best_w = -1e18;
+    for (std::map<uint64_t, ArcEntry>::iterator it = level_archive.begin();
+         it != level_archive.end(); ++it) {
+      if (it->second.traj.size() > 60) continue;   // too expensive to replay
+      double w = -double(it->second.visits) * 10.0
+                 - double(it->second.traj.size()) * 0.2
+                 + double(rng() % 1000) / 1000.0;
+      if (w > best_w) { best_w = w; best = &it->second; }
+    }
+    return best;
+  }
+
+  void restart_from(const ArcEntry* e) {
+    ++restarts;
+    replay_queue.clear();
+    if (e) {
+      replay_queue = e->traj;
+      const_cast<ArcEntry*>(e)->visits += 1;
+    }
+    replaying = !replay_queue.empty();
+    escalation = 0;
+    repeats = 0;
+  }
+
   void on_new_level() {
     // Geometry changed; keep the action model and the winning trigger, drop the
     // map and re-acquire the avatar from its next movement.
@@ -475,9 +595,14 @@ struct Agent {
     ax = ay = -1;
     expect_valid = false;
     reacquire = int(avail.size()) * 2;
+    level_traj.clear();
+    level_archive.clear();
+    replay_queue.clear();
+    replaying = false;
   }
 
-  void observe(const int8_t* frame, int levels_completed, int /*state*/) {
+  void observe(const int8_t* frame, int levels_completed, int state) {
+    last_state = state;
     Grid g;
     std::memcpy(g.c.data(), frame, NCELL);
     prev = cur;
@@ -519,9 +644,52 @@ struct Agent {
     if (levels_completed > levels) {
       levels = levels_completed;
       trigger_action = last_action;
-      trigger_under = last_under;
       trigger_valid = true;
+      if (last_action == A6 && have_prev) {
+        // Describe the thing we clicked, in the frame as it was before the
+        // click, so the same kind of thing can be found in the next level.
+        trigger_kind = TRIG_CLICK;
+        int idx = pending_y * W + pending_x;
+        Box b = component_at(prev, idx, 0);
+        trig_col = prev.c[idx];
+        trig_area = b.area;
+        trig_w = b.w();
+        trig_h = b.h();
+      } else {
+        trigger_kind = TRIG_STAND;
+        trigger_under = last_under;
+      }
       on_new_level();
+    }
+
+    if (have_prev) novelty.note_change(prev, cur);
+    // Archive this state under the cheapest route we know to it. Replaying a
+    // route costs real actions, so cheaper is strictly better.
+    if (!replaying && level_traj.size() <= 120) {
+      uint64_t h = novelty.hash(cur, levels_completed);
+      std::map<uint64_t, ArcEntry>::iterator it = level_archive.find(h);
+      if (it == level_archive.end()) {
+        ArcEntry e;
+        e.traj = level_traj;
+        level_archive[h] = e;
+      } else if (level_traj.size() < it->second.traj.size()) {
+        it->second.traj = level_traj;
+      }
+    }
+    int before = novelty.visit(cur, levels_completed);
+    if (before > 0) {
+      ++repeats;
+    } else {
+      repeats = 0;
+      escalation = 0;   // we are getting somewhere again
+    }
+    // Circling: 40 straight re-entries into states we have already been in.
+    if (repeats > 40) {
+      repeats = 0;
+      if (escalation < 3) ++escalation;
+      plan.clear();
+      if (escalation >= 1) probed5.fill(0);
+      if (escalation >= 2) clicked.clear();
     }
 
     if (ax >= 0 && ay >= 0 && have_prev) last_under = prev.at(ax, ay);
@@ -530,8 +698,18 @@ struct Agent {
     ++steps;
   }
 
-  int emit(int a) {
+  int emit(int a) { return emit(a, pending_x, pending_y); }
+
+  int emit(int a, int x, int y) {
     last_action = a;
+    pending_x = x;
+    pending_y = y;
+    if (a == A_RESET) {
+      level_traj.clear();       // the level starts over
+      forget_map();
+    } else {
+      level_traj.push_back(Act(a, x, y));
+    }
     // Remember where a move action should take us, so the next frame tells us
     // whether that square was walkable.
     int cnt = 0;
@@ -546,6 +724,24 @@ struct Agent {
 
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    // Dead: RESET is the only legal action. Use it to resume from a state worth
+    // revisiting rather than from the start of the level.
+    if (last_state == 3) {
+      restart_from(restart_target());
+      return emit(A_RESET, 0, 0);
+    }
+
+    // Retracing a route we already know.
+    if (replaying) {
+      if (!replay_queue.empty()) {
+        Act a = replay_queue.front();
+        replay_queue.erase(replay_queue.begin());
+        if (replay_queue.empty()) replaying = false;
+        return emit(a.a, a.x, a.y);
+      }
+      replaying = false;
+    }
 
     // 1. Calibration: find out what each action does.
     if (!calib_queue.empty()) {
@@ -568,9 +764,41 @@ struct Agent {
       return emit(a);
     }
 
-    // 4. Replay the trigger that finished the previous level: walk to the
-    //    nearest square of that colour and repeat the winning action.
-    if (trigger_valid && avatar_known && trigger_under >= 0) {
+    // 3b. Circling with nothing left to try: restart this level. A mid-game
+    //     RESET restarts only the current level and keeps the levels we have
+    //     already finished (arcengine base_game.handle_reset), so it is a retry
+    //     rather than a surrender.
+    if (escalation >= 3) {
+      restart_from(restart_target());
+      return emit(A_RESET, 0, 0);
+    }
+
+    // 4a. The previous level ended on a click: find the thing that looks most
+    //     like what we clicked then, and click that.
+    if (trigger_valid && trigger_kind == TRIG_CLICK && has6) {
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      int best = -1;
+      double best_d = 1e18;
+      for (size_t i = 0; i < comps.size(); ++i) {
+        int key = comps[i].cy() * W + comps[i].cx();
+        if (clicked.count(key)) continue;
+        double d = (cols[i] == trig_col ? 0.0 : 50.0)
+                 + std::abs(comps[i].area - trig_area) * 0.5
+                 + std::abs(comps[i].w() - trig_w) * 2.0
+                 + std::abs(comps[i].h() - trig_h) * 2.0;
+        if (d < best_d) { best_d = d; best = int(i); }
+      }
+      if (best >= 0) {
+        const Box& b = comps[best];
+        clicked.insert(b.cy() * W + b.cx());
+        return emit(A6, b.cx(), b.cy());
+      }
+    }
+
+    // 4b. The previous level ended by moving onto something: walk to the
+    //     nearest square of that colour and repeat the winning action.
+    if (trigger_valid && trigger_kind == TRIG_STAND && avatar_known && trigger_under >= 0) {
       std::vector<int> t;
       for (int i = 0; i < NCELL; ++i)
         if (cur.c[i] == trigger_under && !visited[i]) t.push_back(i);
@@ -625,18 +853,14 @@ struct Agent {
         int key = b.cy() * W + b.cx();
         if (clicked.count(key)) continue;
         clicked.insert(key);
-        pending_x = b.cx();
-        pending_y = b.cy();
-        return emit(A6);
+        return emit(A6, b.cx(), b.cy());
       }
       for (int y = 2; y < H; y += 4)
         for (int x = 2; x < W; x += 4) {
           int key = y * W + x;
           if (clicked.count(key)) continue;
           clicked.insert(key);
-          pending_x = x;
-          pending_y = y;
-          return emit(A6);
+          return emit(A6, x, y);
         }
       clicked.clear();
     }
@@ -701,6 +925,9 @@ ARC3_API void arc3_stats(int h, int* out) {
   int nt = 0;
   for (int i = 0; i < NCELL; ++i) nt += a->touched[i] ? 1 : 0;
   out[12] = nt;
+  out[13] = a->escalation;
+  out[14] = int(a->novelty.seen.size());
+  out[15] = a->restarts;
 }
 """
 
@@ -828,12 +1055,17 @@ class MyAgent(Agent):
         return latest_frame.state is GameState.WIN
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
-        if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
+        if latest_frame.state is GameState.NOT_PLAYED:
             return GameAction.RESET
 
         if not self._started:
             self._start(latest_frame)
 
+        # GAME_OVER is not short-circuited here on purpose. RESET restarts the
+        # current level and keeps the levels already finished, so it is a move
+        # in the search rather than an admission of defeat - and the core is
+        # what decides where to resume from. It is told the state and returns
+        # RESET itself when that is the only legal action.
         grid = latest_frame.frame[-1] if latest_frame.frame else None
         if grid is None:
             return GameAction.RESET

@@ -155,12 +155,17 @@ class MyAgent(Agent):
         return latest_frame.state is GameState.WIN
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
-        if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
+        if latest_frame.state is GameState.NOT_PLAYED:
             return GameAction.RESET
 
         if not self._started:
             self._start(latest_frame)
 
+        # GAME_OVER is not short-circuited here on purpose. RESET restarts the
+        # current level and keeps the levels already finished, so it is a move
+        # in the search rather than an admission of defeat - and the core is
+        # what decides where to resume from. It is told the state and returns
+        # RESET itself when that is the only legal action.
         grid = latest_frame.frame[-1] if latest_frame.frame else None
         if grid is None:
             return GameAction.RESET

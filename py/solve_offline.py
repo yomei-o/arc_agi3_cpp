@@ -173,13 +173,15 @@ def object_centroids(frame: np.ndarray) -> list[tuple[int, int]]:
 # Go-Explore
 # ---------------------------------------------------------------------------
 class Entry:
-    __slots__ = ("traj", "levels", "visits", "chosen")
+    __slots__ = ("key", "traj", "levels", "visits", "chosen", "snap")
 
-    def __init__(self, traj: bytes, levels: int) -> None:
+    def __init__(self, key: bytes, traj: bytes, levels: int) -> None:
+        self.key = key
         self.traj = traj
         self.levels = levels
         self.visits = 0
         self.chosen = 0
+        self.snap = None
 
 
 def pack(traj: list[tuple[int, int, int]]) -> bytes:
@@ -205,6 +207,7 @@ class Solver:
         self.snaps: OrderedDict[bytes, object] = OrderedDict()
         self.snap_cache = snap_cache
         self.best_by_level: dict[int, list[tuple[int, int, int]]] = {}
+        self.game_overs = 0
         self.steps = 0        # exploration steps - the search budget
         self.replayed = 0     # steps spent returning to an archived state
         self.max_levels = 0
@@ -215,28 +218,33 @@ class Solver:
         return bytes((levels,)) + masked.tobytes()
 
     # -- restore ----------------------------------------------------------
-    def restore(self, traj: bytes):
-        """Return an env sitting at the end of `traj`."""
-        snap = self.snaps.get(traj)
-        if snap is not None:
-            self.snaps.move_to_end(traj)
-            return copy.deepcopy(snap)
+    def restore(self, e: "Entry"):
+        """Return an env sitting at the state `e` describes, and its frame."""
+        if e.snap is not None:
+            self.snaps.move_to_end(e.key, last=True)
+            env = copy.deepcopy(e.snap)
+            return env, env._last_response
         env = self.arc.make(self.game)
         env.step(GameAction.RESET)  # action_count == 0 => full reset
         obs = None
-        for a, x, y in unpack(traj):
+        for a, x, y in unpack(e.traj):
             act = BY_VALUE[a]
             obs = env.step(act, data={"x": x, "y": y} if act.is_complex() else {})
             self.replayed += 1
         return env, obs
 
-    def remember(self, traj: bytes, env) -> None:
-        if self.snap_cache <= 0:
+    def remember(self, e: "Entry", env) -> None:
+        """Cache a restorable copy. A snapshot costs 18 ms and 1.2 MiB; replaying
+        a depth-d trajectory costs 0.56*d ms, so snapshots pay for themselves
+        past roughly 32 steps deep and the LRU keeps the memory bounded."""
+        if self.snap_cache <= 0 or e.snap is not None:
             return
-        self.snaps[traj] = copy.deepcopy(env)
-        self.snaps.move_to_end(traj)
+        e.snap = copy.deepcopy(env)
+        self.snaps[e.key] = e
+        self.snaps.move_to_end(e.key, last=True)
         while len(self.snaps) > self.snap_cache:
-            self.snaps.popitem(last=False)
+            _, old = self.snaps.popitem(last=False)
+            old.snap = None
 
     # -- main loop --------------------------------------------------------
     def run(self, budget_steps: int, explore_len: int = 40, verbose: bool = False) -> dict:
@@ -246,17 +254,22 @@ class Solver:
         if f is None:
             return {"game": self.game, "error": "no initial frame"}
         k0 = self.key(f, 0)
-        self.archive[k0] = Entry(b"", 0)
-        self.remember(b"", env)
+        root = Entry(k0, b"", 0)
+        self.archive[k0] = root
+        self.remember(root, env)
 
         t0 = time.time()
+        next_report = 5000
         while self.steps < budget_steps:
+            if verbose and self.steps >= next_report:
+                next_report = self.steps + 5000
+                el = time.time() - t0
+                print(f"    [{self.game}] explore={self.steps} replay={self.replayed} "
+                      f"archive={len(self.archive)} snaps={len(self.snaps)} "
+                      f"levels={self.max_levels} overs={self.game_overs} {el:.0f}s "
+                      f"({self.steps/max(el,1e-9):.0f} explore-steps/s)", flush=True)
             parent = self.select()
-            restored = self.restore(parent.traj)
-            if isinstance(restored, tuple):
-                env, obs = restored
-            else:
-                env, obs = restored, None
+            env, obs = self.restore(parent)
             if obs is None:
                 obs = env._last_response
             frame = frame_of(obs)
@@ -286,6 +299,7 @@ class Solver:
                 levels = int(obs.levels_completed)
 
                 if obs.state is GameState.GAME_OVER:
+                    self.game_overs += 1
                     # Only RESET is legal now; it restarts this level and keeps
                     # the levels we already finished.
                     obs = env.step(GameAction.RESET)
@@ -311,13 +325,13 @@ class Solver:
                 cur = self.archive.get(k)
                 packed = pack(traj)
                 if cur is None:
-                    self.archive[k] = Entry(packed, levels)
+                    e = Entry(k, packed, levels)
+                    self.archive[k] = e
                     if len(packed) > 3 * 32:
-                        self.remember(packed, env)
+                        self.remember(e, env)
                 elif len(packed) < len(cur.traj):
                     # Same state, cheaper route: keep the cheap one. This is
                     # what turns the archive into an action-count optimiser.
-                    self.snaps.pop(cur.traj, None)
                     cur.traj = packed
                     cur.visits = 0
 
@@ -343,7 +357,12 @@ class Solver:
 
     def report(self, seconds: float) -> dict:
         levels = sorted(self.best_by_level)
+        per_level: dict[str, int] = {}
+        for e in self.archive.values():
+            per_level[str(e.levels)] = per_level.get(str(e.levels), 0) + 1
         return {
+            "archive_by_level": per_level,
+            "game_overs": self.game_overs,
             "game": self.game,
             "sim_steps": self.steps,
             "replay_steps": self.replayed,
@@ -392,7 +411,8 @@ def main() -> None:
         print(f"  {r['game']:6} levels={r['max_levels']:2}  "
               f"actions={r['actions_to_level']}  archive={r['archive']:6}  "
               f"explore={r['sim_steps']} replay={r['replay_steps']} "
-              f"snaps={r['snapshots']}  {r['seconds']}s", flush=True)
+              f"byLevel={r['archive_by_level']} overs={r['game_overs']}  {r['seconds']}s",
+              flush=True)
 
     if args.jobs > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
