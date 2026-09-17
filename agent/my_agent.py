@@ -256,6 +256,148 @@ struct ColorRule {
   bool is_pickup() const { return collected > passed; }
 };
 
+// ---------------------------------------------------------------------------
+// A learned model of the game, and search inside it.
+//
+// Offline, where deepcopy gives a perfect simulator, search solves 15 of 17
+// public games and finds routes shorter than the human baselines. Online there
+// is no simulator, and porting the search does not work: a restore costs a
+// RESET plus replaying the route, so at ten times the real action budget it
+// scores worse than doing nothing clever. What has to cross over is not the
+// search but a model to search inside.
+//
+// The games all run on the same sprite engine, so the model is object-centric:
+// a scene is a set of (colour, width, height) objects at positions, and an
+// action displaces each class by an amount we learn by watching. Prediction is
+// then cheap enough to run a beam search every step and act on its first move,
+// re-planning once reality has had its say (MPC), which is what keeps an
+// imperfect model useful.
+// ---------------------------------------------------------------------------
+struct ObjClass {
+  int color, w, h;
+  ObjClass() : color(0), w(0), h(0) {}
+  ObjClass(int c, int w_, int h_) : color(c), w(w_), h(h_) {}
+  bool operator<(const ObjClass& o) const {
+    if (color != o.color) return color < o.color;
+    if (w != o.w) return w < o.w;
+    return h < o.h;
+  }
+  bool operator==(const ObjClass& o) const {
+    return color == o.color && w == o.w && h == o.h;
+  }
+};
+
+struct Obj {
+  ObjClass k;
+  int x, y;
+  Obj() : x(0), y(0) {}
+  Obj(const ObjClass& k_, int x_, int y_) : k(k_), x(x_), y(y_) {}
+};
+
+struct Scene {
+  std::vector<Obj> objs;
+
+  uint64_t hash() const {
+    // Order-independent, so the same arrangement hashes alike however the
+    // objects came out of the extractor.
+    uint64_t h = 0;
+    for (size_t i = 0; i < objs.size(); ++i) {
+      uint64_t v = 1469598103934665603ULL;
+      const Obj& o = objs[i];
+      int f[5] = {o.k.color, o.k.w, o.k.h, o.x, o.y};
+      for (int j = 0; j < 5; ++j) { v ^= uint64_t(f[j] + 1); v *= 1099511628211ULL; }
+      h += v;
+    }
+    return h;
+  }
+};
+
+Scene scene_of(const Grid& g, const std::set<int>& bg, int max_objects = 96) {
+  Scene s;
+  std::vector<int> cols;
+  std::vector<Box> comps = components(g, bg, &cols);
+  for (size_t i = 0; i < comps.size() && int(s.objs.size()) < max_objects; ++i) {
+    // Scenery spans the board; it is not something an action moves.
+    if (comps[i].w() > 24 || comps[i].h() > 24) continue;
+    s.objs.push_back(Obj(ObjClass(cols[i], comps[i].w(), comps[i].h()),
+                         comps[i].minx, comps[i].miny));
+  }
+  return s;
+}
+
+struct WorldModel {
+  // (action, class) -> how far that class moved, and how often.
+  std::map<std::pair<int, ObjClass>, std::map<Vec, int> > disp;
+  std::map<ObjClass, int> seen_class;
+  int observations;
+
+  WorldModel() : observations(0) {}
+
+  Vec best(int action, const ObjClass& k, int* count) const {
+    std::map<std::pair<int, ObjClass>, std::map<Vec, int> >::const_iterator it =
+        disp.find(std::make_pair(action, k));
+    if (it == disp.end()) { if (count) *count = 0; return Vec(); }
+    Vec b; int bc = 0;
+    for (std::map<Vec, int>::const_iterator j = it->second.begin(); j != it->second.end(); ++j)
+      if (j->second > bc) { bc = j->second; b = j->first; }
+    if (count) *count = bc;
+    return b;
+  }
+
+  // Match objects between two scenes by class and proximity, and record what
+  // the action did to each class.
+  void learn(const Scene& a, const Scene& b, int action) {
+    ++observations;
+    std::vector<uint8_t> taken(b.objs.size(), 0);
+    for (size_t i = 0; i < a.objs.size(); ++i) {
+      const Obj& o = a.objs[i];
+      ++seen_class[o.k];
+      int best_j = -1, best_d = 1 << 30;
+      for (size_t j = 0; j < b.objs.size(); ++j) {
+        if (taken[j] || !(b.objs[j].k == o.k)) continue;
+        int d = std::abs(b.objs[j].x - o.x) + std::abs(b.objs[j].y - o.y);
+        if (d < best_d) { best_d = d; best_j = int(j); }
+      }
+      if (best_j < 0 || best_d > 24) continue;   // vanished, or not the same thing
+      taken[best_j] = 1;
+      Vec v(b.objs[best_j].x - o.x, b.objs[best_j].y - o.y);
+      disp[std::make_pair(action, o.k)][v] += 1;
+    }
+  }
+
+  // What we think the scene becomes. Classes we have never seen move are left
+  // where they are, which is right far more often than not.
+  //
+  // `blocked` says which board squares refuse the avatar, from the colour table
+  // learned by walking into things. Without it the model happily predicts
+  // walking through walls, and a search rewarding novelty then chases states
+  // that cannot happen - which is exactly how the first version of this scored
+  // worse than no model at all.
+  Scene predict(const Scene& s, int action, const std::vector<uint8_t>* blocked) const {
+    Scene out;
+    out.objs.reserve(s.objs.size());
+    for (size_t i = 0; i < s.objs.size(); ++i) {
+      int c = 0;
+      Vec v = best(action, s.objs[i].k, &c);
+      Obj o = s.objs[i];
+      if (c > 0 && !v.zero()) {
+        int nx = o.x + v.dx, ny = o.y + v.dy;
+        bool ok = nx >= 0 && ny >= 0 && nx + o.k.w <= W && ny + o.k.h <= H;
+        if (ok && blocked) {
+          for (int dy = 0; dy < o.k.h && ok; ++dy)
+            for (int dx = 0; dx < o.k.w && ok; ++dx)
+              if ((*blocked)[(ny + dy) * W + (nx + dx)]) ok = false;
+        }
+        if (ok) { o.x = nx; o.y = ny; }
+      }
+      out.objs.push_back(o);
+    }
+    return out;
+  }
+
+  bool usable() const { return observations >= 12 && !disp.empty(); }
+};
+
 // One issued action, so a route through a level can be replayed.
 struct Act {
   int a, x, y;
@@ -415,9 +557,53 @@ struct Agent {
   // 3 = systematic Go-Explore: the offline algorithm, run for real - every
   //     `rollout_len` actions, go back to an archived state and explore from
   //     there, instead of only doing so on death or when circling
+  // 4 = plan inside the learned model, act on the first move, re-plan (MPC)
   int explore_mode;
   int rollout_len;
   int since_restart;
+
+  // Iterative deepening over action sequences, in the real game.
+  //
+  // The compressed offline solutions say these levels are not deep: VC33 and
+  // R11L finish level 1 in two actions, SP80 in three, CD82 in four. They are
+  // hard to FIND, not hard to execute. And a mid-game RESET restarts only the
+  // current level while keeping the levels already finished, so a sequence can
+  // be tried, abandoned, and the next one tried, for the cost of the sequence
+  // plus one action. Depth 4 over four actions is about 1,280 actions - inside
+  // the roughly 3,000 a game like LS20 allows.
+  struct BfsNode {
+    std::vector<Act> traj;
+    int next_action;
+    BfsNode() : next_action(0) {}
+  };
+  std::vector<Act> idd_actions;   // the alphabet we search over
+  std::vector<BfsNode> bfs;       // the queue, in breadth-first order
+  size_t bfs_head;
+  std::set<uint64_t> bfs_seen;    // one entry per distinct state reached
+  std::vector<Act> idd_played;    // the route we are currently walking
+  std::vector<Act> idd_solution;  // the route that finished the last level
+  int bfs_phase;                  // 0 reset, 1 replay, 2 probe
+  int bfs_replay_pos;
+  bool idd_active, idd_try_solution;
+  int idd_pos;
+  long idd_tried, idd_pruned;
+
+  // Mode 6: expand wherever we are standing.
+  //
+  // A breadth-first search that resets before every probe pays one RESET plus
+  // the whole route for each action it tries - about eight actions per probe on
+  // LS20, which buys only 54 states out of 1500 actions. But while the search
+  // is moving forward it is already standing in the state it wants to expand,
+  // so a probe costs exactly one action. Only a dead end needs a restore.
+  std::map<uint64_t, std::vector<Act> > ge_route;   // cheapest route to a state
+  std::map<uint64_t, int> ge_tried;                 // alphabet entries tried there
+  uint64_t ge_here;
+  bool ge_ready;
+
+  WorldModel wm;
+  Scene cur_scene;
+  bool have_scene;
+  std::set<uint64_t> scene_seen;   // arrangements we have actually been in
   int sticky_a, sticky_x, sticky_y;
 
   std::map<int, ColorRule> rules;   // colour stepped onto -> what happened
@@ -446,12 +632,20 @@ struct Agent {
         trigger_kind(TRIG_NONE), trigger_action(-1), trigger_under(-1),
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
-        explore_mode(2), rollout_len(60), since_restart(0),
+        bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
+        idd_active(false), idd_try_solution(false), ge_here(0), ge_ready(false),
+        explore_mode(2), rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
         replaying(false), restarts(0) {
     click_x = click_y = -1;
     click_live = false;
+    idd_pos = 0;
+    idd_tried = 0;
+    idd_pruned = 0;
+    ge_here = 0;
+    ge_ready = false;
+    idd_pruned = 0;
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
@@ -704,6 +898,10 @@ struct Agent {
     level_archive.clear();
     replay_queue.clear();
     replaying = false;
+    ge_route.clear();
+    ge_tried.clear();
+    ge_ready = false;
+    if (explore_mode == 5 || explore_mode == 6) idd_begin();
   }
 
   void observe(const int8_t* frame, int levels_completed, int state) {
@@ -766,6 +964,10 @@ struct Agent {
       // instead: the square we were stepping onto is what ended the level, and
       // that is the single most valuable thing to know for levels 2..N.
       if (rule_target >= 0) ++rules[rule_target].completed;
+      if (idd_active || idd_try_solution || explore_mode == 6) {
+        if (!idd_played.empty()) idd_solution = idd_played;
+        idd_try_solution = false;
+      }
       levels = levels_completed;
       trigger_action = last_action;
       trigger_valid = true;
@@ -793,6 +995,45 @@ struct Agent {
       } else {
         click_live = false;
         clicked.insert(click_y * W + click_x);
+      }
+    }
+
+    {
+      Scene ns = scene_of(cur, bg);
+      if (have_prev && have_scene && last_action >= A1 && last_action <= A7)
+        wm.learn(cur_scene, ns, last_action);
+      cur_scene = ns;
+      have_scene = true;
+      scene_seen.insert(cur_scene.hash());
+    }
+
+    if (explore_mode == 6) {
+      uint64_t h = cur_scene.hash() ^ (uint64_t(levels_completed) * 0x9E3779B97F4A7C15ULL);
+      std::map<uint64_t, std::vector<Act> >::iterator it = ge_route.find(h);
+      if (it == ge_route.end())
+        ge_route[h] = level_traj;
+      else if (level_traj.size() < it->second.size())
+        it->second = level_traj;      // a cheaper way back, worth keeping
+      ge_here = h;
+      ge_ready = true;
+    }
+
+    if (explore_mode == 5 && idd_active && bfs_phase == 0 && !idd_played.empty()) {
+      // We have just probed one action from the current node. Keep the state it
+      // reached only if it is new: everything else is a route we have already
+      // got a cheaper way to reach, which is what makes this a search over
+      // states rather than over sequences.
+      // Key on the objects, not the raw frame. The remaining-actions bar sits
+      // in the frame and advances on its own, so a frame hash makes every state
+      // look new and the search degenerates into enumerating sequences. The bar
+      // is wider than any sprite and so is already excluded from the scene.
+      uint64_t h = cur_scene.hash() ^ (uint64_t(levels_completed) * 0x9E3779B97F4A7C15ULL);
+      if (bfs_seen.insert(h).second) {
+        BfsNode child;
+        child.traj = idd_played;
+        bfs.push_back(child);
+      } else {
+        ++idd_pruned;
       }
     }
 
@@ -884,6 +1125,161 @@ struct Agent {
     return emit(a.a, a.x, a.y);
   }
 
+// Where the avatar is in a scene, if we have identified one.
+  int avatar_in(const Scene& s) const {
+    if (av_color < 0) return -1;
+    for (size_t i = 0; i < s.objs.size(); ++i)
+      if (s.objs[i].k.color == av_color && s.objs[i].k.w == av_w && s.objs[i].k.h == av_h)
+        return int(i);
+    return -1;
+  }
+
+  // Distance from the avatar to the nearest object of a colour that has ended a
+  // level before. Once level 1 has taught us that colour, closing this distance
+  // is the whole game.
+  double goal_distance(const Scene& s) const {
+    int ai = avatar_in(s);
+    if (ai < 0) return -1.0;
+    double best = -1.0;
+    for (size_t i = 0; i < s.objs.size(); ++i) {
+      std::map<int, ColorRule>::const_iterator r = rules.find(s.objs[i].k.color);
+      if (r == rules.end() || !r->second.is_goal()) continue;
+      double d = std::abs(s.objs[i].x - s.objs[ai].x) + std::abs(s.objs[i].y - s.objs[ai].y);
+      if (best < 0 || d < best) best = d;
+    }
+    return best;
+  }
+
+  // Beam search inside the learned model. We only ever play its first move and
+  // then look again, so the model being approximate costs us a step, not a plan.
+  std::vector<uint8_t> blocked_map() const {
+    std::vector<uint8_t> b(NCELL, 0);
+    for (int i = 0; i < NCELL; ++i) {
+      if (known[i] == BLOCKED) { b[i] = 1; continue; }
+      std::map<int, ColorRule>::const_iterator r = rules.find(cur.c[i]);
+      if (r != rules.end() && r->second.is_wall()) b[i] = 1;
+    }
+    return b;
+  }
+
+  int model_explore(const std::set<int>& bg) {
+    if (!wm.usable()) return sticky_explore(bg);
+    std::vector<uint8_t> blocked = blocked_map();
+
+    std::vector<int> moves;
+    for (size_t i = 0; i < avail.size(); ++i)
+      if (avail[i] != A6) moves.push_back(avail[i]);
+    if (moves.empty()) return sticky_explore(bg);
+
+    const int DEPTH = 10, WIDTH = 24;
+    struct Node {
+      Scene s;
+      std::vector<int> acts;
+      double score;
+    };
+    std::vector<Node> beam;
+    Node root;
+    root.s = cur_scene;
+    root.score = 0.0;
+    beam.push_back(root);
+
+    std::set<uint64_t> local;
+    double d0 = goal_distance(cur_scene);
+
+    for (int d = 0; d < DEPTH; ++d) {
+      std::vector<Node> next;
+      next.reserve(beam.size() * moves.size());
+      double decay = 1.0;
+      for (int k = 0; k < d; ++k) decay *= 0.92;
+      for (size_t b = 0; b < beam.size(); ++b) {
+        for (size_t m = 0; m < moves.size(); ++m) {
+          Node n;
+          n.s = wm.predict(beam[b].s, moves[m], &blocked);
+          n.acts = beam[b].acts;
+          n.acts.push_back(moves[m]);
+          uint64_t h = n.s.hash();
+          double bonus = 0.0;
+          if (!scene_seen.count(h) && !local.count(h)) bonus += 1.0;
+          local.insert(h);
+          double dn = goal_distance(n.s);
+          if (d0 >= 0 && dn >= 0) bonus += (d0 - dn) * 0.25;   // walking towards it
+          n.score = beam[b].score + bonus * decay;
+          next.push_back(n);
+        }
+      }
+      if (next.empty()) break;
+      std::sort(next.begin(), next.end(),
+                [](const Node& a, const Node& b) { return a.score > b.score; });
+      if (int(next.size()) > WIDTH) next.resize(WIDTH);
+      beam.swap(next);
+    }
+
+    if (beam.empty() || beam[0].acts.empty() || beam[0].score <= 0.0)
+      return sticky_explore(bg);   // the model sees nothing worth doing
+    return emit(beam[0].acts[0], 0, 0);
+  }
+
+// The alphabet to enumerate. Movement games give four to six actions; click
+  // games would give 4,096, so those are narrowed to the rare, small objects
+  // that the solved games say are the ones that matter.
+  void build_idd_alphabet() {
+    idd_actions.clear();
+    for (size_t i = 0; i < avail.size(); ++i)
+      if (avail[i] != A6) idd_actions.push_back(Act(avail[i], 0, 0));
+    if (has6) {
+      std::set<int> bg = background_colors(cur);
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      std::array<int, 32> hist = color_counts();
+      std::vector<std::pair<int, int> > order;
+      for (size_t i = 0; i < comps.size(); ++i) {
+        int c = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
+        order.push_back(std::make_pair(hist[c] * 4 + comps[i].area, int(i)));
+      }
+      std::sort(order.begin(), order.end());
+      size_t take = idd_actions.empty() ? 10 : 4;
+      for (size_t i = 0; i < order.size() && i < take; ++i) {
+        const Box& b = comps[order[i].second];
+        idd_actions.push_back(Act(A6, b.cx(), b.cy()));
+      }
+    }
+  }
+
+  void idd_begin() {
+    build_idd_alphabet();
+    // Actions observed to move something go first, so the shallow layers of the
+    // search spend their actions on moves that do anything.
+    std::stable_sort(idd_actions.begin(), idd_actions.end(),
+                     [this](const Act& x, const Act& y) {
+                       int cx = 0, cy = 0;
+                       best_move(x.a, &cx);
+                       best_move(y.a, &cy);
+                       return cx > cy;
+                     });
+    bfs.clear();
+    bfs.push_back(BfsNode());          // the level's starting state
+    bfs_head = 0;
+    bfs_seen.clear();
+    bfs_phase = 0;
+    bfs_replay_pos = 0;
+    idd_played.clear();
+    idd_pos = 0;
+    idd_tried = 0;
+    idd_pruned = 0;
+    ge_here = 0;
+    ge_ready = false;
+    idd_active = !idd_actions.empty();
+    idd_try_solution = !idd_solution.empty();
+  }
+
+  // Move on when the current node has had every action tried on it.
+  void bfs_advance() {
+    while (bfs_head < bfs.size() &&
+           bfs[bfs_head].next_action >= int(idd_actions.size()))
+      ++bfs_head;
+    if (bfs_head >= bfs.size()) idd_active = false;
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
 
@@ -932,6 +1328,139 @@ struct Agent {
         }
       }
       return sticky_explore(bg);
+    }
+
+if (explore_mode == 6 && ge_ready && !idd_actions.empty()) {
+      if (replaying) {
+        if (!replay_queue.empty()) {
+          Act a = replay_queue.front();
+          replay_queue.erase(replay_queue.begin());
+          if (replay_queue.empty()) replaying = false;
+          return emit(a.a, a.x, a.y);
+        }
+        replaying = false;
+      }
+
+      // The levels of a game share their mechanics, so before searching this
+      // level from scratch, replay whatever finished the last one.
+      if (idd_try_solution && last_state != 3) {
+        if (idd_pos < int(idd_solution.size())) {
+          Act a = idd_solution[idd_pos++];
+          idd_played.push_back(a);
+          return emit(a.a, a.x, a.y);
+        }
+        idd_try_solution = false;
+        idd_pos = 0;
+      }
+
+      // Once level 1 has told us which colour ends a level, going there beats
+      // searching - and the later levels, where this pays, are the ones the
+      // per-game score weights most heavily.
+      if (last_state != 3 && avatar_known && ax >= 0) {
+        std::vector<int> p2 = plan_to(goal_targets());
+        if (!p2.empty()) {
+          plan = p2;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+
+      // Dead means only RESET is legal; take it and go back somewhere useful.
+      if (last_state != 3) {
+        int& t = ge_tried[ge_here];
+        if (t < int(idd_actions.size())) {
+          Act a = idd_actions[t++];
+          ++idd_tried;
+          idd_played.push_back(a);
+          return emit(a.a, a.x, a.y);      // one action per probe
+        }
+      }
+
+      // Nothing left to try here: return to the cheapest state that still has
+      // something untried.
+      const std::vector<Act>* best = 0;
+      size_t best_len = 0;
+      for (std::map<uint64_t, std::vector<Act> >::iterator it = ge_route.begin();
+           it != ge_route.end(); ++it) {
+        std::map<uint64_t, int>::iterator k = ge_tried.find(it->first);
+        if (k != ge_tried.end() && k->second >= int(idd_actions.size())) continue;
+        if (!best || it->second.size() < best_len) { best = &it->second; best_len = it->second.size(); }
+      }
+      if (best) {
+        replay_queue = *best;
+        replaying = !replay_queue.empty();
+        idd_played.clear();
+        ++restarts;
+        return emit(A_RESET, 0, 0);
+      }
+      // Everything reachable has been tried: let the heuristic policy take over.
+    }
+
+    if (explore_mode == 5) {
+      if (!idd_active && !idd_try_solution && idd_actions.empty()) idd_begin();
+
+      // Levels of one game share their mechanics, so the sequence that ended
+      // the last level is the first thing worth trying on this one.
+      if (idd_try_solution) {
+        if (idd_pos < int(idd_solution.size())) {
+          Act a = idd_solution[idd_pos++];
+          idd_played.push_back(a);
+          return emit(a.a, a.x, a.y);
+        }
+        idd_try_solution = false;
+        idd_pos = 0;
+        idd_played.clear();
+        return emit(A_RESET, 0, 0);
+      }
+
+      if (idd_active) {
+        bfs_advance();
+        if (!idd_active) {
+          // nothing left to expand
+        } else if (last_state == 3) {
+          bfs_phase = 0;                       // died; start the next probe
+        }
+        if (idd_active) {
+          BfsNode& n = bfs[bfs_head];
+          if (bfs_phase == 0) {                // go back to the level start
+            bfs_phase = 1;
+            bfs_replay_pos = 0;
+            idd_played.clear();
+            return emit(A_RESET, 0, 0);
+          }
+          if (bfs_phase == 1) {                // walk to this node
+            if (bfs_replay_pos < int(n.traj.size())) {
+              Act a = n.traj[bfs_replay_pos++];
+              idd_played.push_back(a);
+              return emit(a.a, a.x, a.y);
+            }
+            bfs_phase = 2;
+          }
+          // Try one untried action from here; the next frame tells us whether
+          // it reached somewhere new.
+          Act a = idd_actions[n.next_action++];
+          idd_played.push_back(a);
+          ++idd_tried;
+          bfs_phase = 0;
+          return emit(a.a, a.x, a.y);
+        }
+      }
+      // Search exhausted: fall through to the heuristic policy.
+    }
+
+    if (explore_mode == 4 && calib_queue.empty() && plan.empty() && !replaying) {
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      if (has6 && click_live && click_x >= 0) return emit(A6, click_x, click_y);
+      return model_explore(bg);
     }
 
     // Systematic Go-Explore: a rollout ends, we go back somewhere promising.
@@ -1175,6 +1704,18 @@ ARC3_API void arc3_stats(int h, int* out) {
   out[16] = int(a->rules.size());
   out[17] = goals;
   out[18] = walls;
+  out[19] = a->wm.observations;
+  out[20] = int(a->wm.disp.size());
+  out[21] = int(a->scene_seen.size());
+  out[22] = int(a->cur_scene.objs.size());
+  out[23] = int(a->bfs.size());
+  out[24] = int(a->idd_tried);
+  out[25] = int(a->idd_actions.size());
+  out[26] = int(a->idd_solution.size());
+  out[27] = int(a->idd_pruned);
+  out[28] = int(a->bfs_head);
+  out[29] = int(a->ge_route.size());
+  out[30] = int(a->ge_tried.size());
 }
 """
 

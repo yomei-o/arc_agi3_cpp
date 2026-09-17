@@ -55,7 +55,8 @@ def dump(tag: str) -> None:
     core.arc3_stats(agent._h, stats)
     names = ["known", "color", "ax", "ay", "steps", "levels", "trig", "blocked",
              "w", "h", "plan", "stag", "touched", "esc", "states", "restarts",
-             "rules", "goals", "walls"]
+             "rules", "goals", "walls", "wm_obs", "wm_cls", "scenes", "objs",
+             "bfsQ", "probes", "alpha", "solLen", "pruned", "bfsHead"]
     print(f"  [{tag}] " + "  ".join(f"{n}={stats[i]}" for i, n in enumerate(names)))
 
 
