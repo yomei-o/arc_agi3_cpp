@@ -130,20 +130,21 @@ _STATE_CODE = {
 }
 
 
-# When the notebook started. On Kaggle every action is an HTTP round trip to the
-# gateway, and the whole run has to finish inside 12 hours across every hidden
-# game, so the agent has to budget wall-clock as carefully as it budgets actions.
+# The framework plays every game at once - Swarm starts one thread per game
+# (agents/swarm.py) - so games do not share the clock, they each get the whole
+# run. Capping a game at five minutes was therefore pure self-harm: the official
+# sample plays each game for eight hours and scores about 3.5, while this agent
+# stopped after 300 seconds and scored 0.19.
 _PROCESS_START = time.monotonic()
-_GLOBAL_BUDGET_S = 10.5 * 3600      # margin under the 12 h limit
-_PER_GAME_S = 300.0                 # ~100 games would then fit in ~8.3 h
+_GAME_BUDGET_S = 8 * 3600 - 5 * 60   # what the sample uses, inside the 12 h limit
 
 
 class MyAgent(Agent):
     """Explore deliberately, then repeat what worked."""
 
-    # A ceiling, not a target. The harness overrides it with the real per-game
-    # budget when measuring locally.
-    MAX_ACTIONS = 6_000
+    # Not a real limit: the framework stops on is_done, and stopping early only
+    # forfeits levels. The harness overrides it when measuring locally.
+    MAX_ACTIONS = 10_000_000
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -176,12 +177,11 @@ class MyAgent(Agent):
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
         if latest_frame.state is GameState.WIN:
             return True
-        now = time.monotonic()
-        # Running out of wall-clock loses every game that has not been played
-        # yet, which costs far more than giving up on this one.
-        if now - self._t0 > _PER_GAME_S:
-            return True
-        return now - _PROCESS_START > _GLOBAL_BUDGET_S
+        # Keep playing until the run is nearly over. There is nothing to save
+        # the time for - the other games are already running in their own
+        # threads - and a level left unfinished scores zero however few actions
+        # were spent failing to finish it.
+        return time.monotonic() - _PROCESS_START > _GAME_BUDGET_S
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
         if latest_frame.state is GameState.NOT_PLAYED:

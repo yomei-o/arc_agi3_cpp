@@ -630,6 +630,19 @@ struct Agent {
   // LS20, which buys only 54 states out of 1500 actions. But while the search
   // is moving forward it is already standing in the state it wants to expand,
   // so a probe costs exactly one action. Only a dead end needs a restore.
+  // Mode 8: a tabular version of what the official sample learns.
+  //
+  // StochasticGoose trains a CNN to predict which actions produce a NEW frame,
+  // and samples from that. Almost all of what such a net can express here is
+  // "this action, or this coordinate, tends to do something", and that is a
+  // table: how often each simple action and each of the 4,096 coordinates
+  // changed the frame, and how often it was tried. Sampling by the posterior
+  // mean of that gives the same behaviour without a network, which matters
+  // because the agent has to keep up with an HTTP round trip per action.
+  std::array<int, NCELL> click_tries, click_change;
+  std::array<int, 8> act_tries, act_change;
+  int last_click_idx;
+
   std::map<uint64_t, std::vector<Act> > ge_route;   // cheapest route to a state
   std::map<uint64_t, int> ge_tried;                 // alphabet entries tried there
   uint64_t ge_here;
@@ -677,6 +690,11 @@ struct Agent {
         replaying(false), restarts(0) {
     click_x = click_y = -1;
     click_live = false;
+    click_tries.fill(0);
+    click_change.fill(0);
+    act_tries.fill(0);
+    act_change.fill(0);
+    last_click_idx = -1;
     idd_pos = 0;
     idd_tried = 0;
     idd_pruned = 0;
@@ -1094,6 +1112,15 @@ struct Agent {
       }
     }
 
+    if (have_prev && last_action >= 0 && last_action < 8) {
+      ++act_tries[last_action];
+      if (changed) ++act_change[last_action];
+      if (last_action == A6 && last_click_idx >= 0) {
+        ++click_tries[last_click_idx];
+        if (changed) ++click_change[last_click_idx];
+      }
+    }
+
     if (have_prev) novelty.note_change(prev, cur);
     // Archive this state under the cheapest route we know to it. Replaying a
     // route costs real actions, so cheaper is strictly better.
@@ -1137,6 +1164,7 @@ struct Agent {
     last_action = a;
     pending_x = x;
     pending_y = y;
+    last_click_idx = (a == A6 && in_bounds(x, y)) ? y * W + x : -1;
     if (a == A_RESET) {
       level_traj.clear();       // the level starts over
       forget_map();
@@ -1348,8 +1376,76 @@ struct Agent {
     if (bfs_head >= bfs.size()) idd_active = false;
   }
 
+// Sample an action in proportion to how often it has done something. A spot
+  // never tried is optimistic (1/2), so everything gets looked at once before
+  // anything is written off, and a spot that keeps working keeps being chosen.
+  int novelty_sample(const std::set<int>& bg) {
+    double total = 0.0;
+    std::vector<std::pair<double, Act> > cands;
+    for (size_t i = 0; i < avail.size(); ++i) {
+      int a = avail[i];
+      if (a == A6) continue;
+      double w = (act_change[a] + 1.0) / (act_tries[a] + 2.0);
+      cands.push_back(std::make_pair(w, Act(a, 0, 0)));
+      total += w;
+    }
+    if (has6) {
+      // Offer the objects, and a coarse sweep so bare background is reachable
+      // too - VC33's second level is finished by clicking empty board.
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      for (size_t i = 0; i < comps.size() && i < 48; ++i) {
+        int idx = comps[i].cy() * W + comps[i].cx();
+        double w = (click_change[idx] + 1.0) / (click_tries[idx] + 2.0);
+        cands.push_back(std::make_pair(w, Act(A6, comps[i].cx(), comps[i].cy())));
+        total += w;
+      }
+      for (int y = 1; y < H; y += 4)
+        for (int x = 1; x < W; x += 4) {
+          int idx = y * W + x;
+          double w = (click_change[idx] + 1.0) / (click_tries[idx] + 2.0);
+          cands.push_back(std::make_pair(w, Act(A6, x, y)));
+          total += w;
+        }
+    }
+    if (cands.empty()) return emit(A1, 0, 0);
+
+    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    for (size_t i = 0; i < cands.size(); ++i) {
+      r -= cands[i].first;
+      if (r <= 0.0) return emit(cands[i].second.a, cands[i].second.x, cands[i].second.y);
+    }
+    const Act& a = cands.back().second;
+    return emit(a.a, a.x, a.y);
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    if (explore_mode == 8) {
+      if (last_state == 3) return emit(A_RESET, 0, 0);
+      if (!calib_queue.empty()) {
+        int a = calib_queue.front();
+        calib_queue.erase(calib_queue.begin());
+        return emit(a);
+      }
+      // Everything learned about where a level ends still applies.
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      return novelty_sample(bg);
+    }
 
     // Mode 7: spend the budget on several policies in turn.
     //
@@ -1952,20 +2048,21 @@ _STATE_CODE = {
 }
 
 
-# When the notebook started. On Kaggle every action is an HTTP round trip to the
-# gateway, and the whole run has to finish inside 12 hours across every hidden
-# game, so the agent has to budget wall-clock as carefully as it budgets actions.
+# The framework plays every game at once - Swarm starts one thread per game
+# (agents/swarm.py) - so games do not share the clock, they each get the whole
+# run. Capping a game at five minutes was therefore pure self-harm: the official
+# sample plays each game for eight hours and scores about 3.5, while this agent
+# stopped after 300 seconds and scored 0.19.
 _PROCESS_START = time.monotonic()
-_GLOBAL_BUDGET_S = 10.5 * 3600      # margin under the 12 h limit
-_PER_GAME_S = 300.0                 # ~100 games would then fit in ~8.3 h
+_GAME_BUDGET_S = 8 * 3600 - 5 * 60   # what the sample uses, inside the 12 h limit
 
 
 class MyAgent(Agent):
     """Explore deliberately, then repeat what worked."""
 
-    # A ceiling, not a target. The harness overrides it with the real per-game
-    # budget when measuring locally.
-    MAX_ACTIONS = 6_000
+    # Not a real limit: the framework stops on is_done, and stopping early only
+    # forfeits levels. The harness overrides it when measuring locally.
+    MAX_ACTIONS = 10_000_000
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -1998,12 +2095,11 @@ class MyAgent(Agent):
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
         if latest_frame.state is GameState.WIN:
             return True
-        now = time.monotonic()
-        # Running out of wall-clock loses every game that has not been played
-        # yet, which costs far more than giving up on this one.
-        if now - self._t0 > _PER_GAME_S:
-            return True
-        return now - _PROCESS_START > _GLOBAL_BUDGET_S
+        # Keep playing until the run is nearly over. There is nothing to save
+        # the time for - the other games are already running in their own
+        # threads - and a level left unfinished scores zero however few actions
+        # were spent failing to finish it.
+        return time.monotonic() - _PROCESS_START > _GAME_BUDGET_S
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
         if latest_frame.state is GameState.NOT_PLAYED:
