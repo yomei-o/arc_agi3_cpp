@@ -347,7 +347,15 @@ struct Agent {
   std::array<uint8_t, NCELL> visited;
   std::array<uint8_t, NCELL> probed5;
   std::array<uint8_t, NCELL> touched;   // objects we have already walked to
-  std::set<int> clicked;
+  std::set<int> clicked;                // coordinates that stopped paying off
+
+  // A click target we are still working. The solved click-only games are full
+  // of the same coordinate pressed several times in a row - S5I5's level 1 is
+  // thirteen clicks alternating between two points - so a policy that visits
+  // each object once and never returns cannot solve them at all.
+  int click_x, click_y;
+  bool click_live;
+
 
   std::vector<int> plan;
   int last_action;
@@ -368,6 +376,17 @@ struct Agent {
   int stagnant;
   int blocked_marks;
   int reacquire;  // countdown of probe moves used to find the avatar again
+
+  // 0 = directed (plan routes to frontiers and objects)
+  // 1 = sticky-random (what the offline solver actually uses)
+  // 2 = directed, falling back to sticky-random once it runs dry
+  // 3 = systematic Go-Explore: the offline algorithm, run for real - every
+  //     `rollout_len` actions, go back to an archived state and explore from
+  //     there, instead of only doing so on death or when circling
+  int explore_mode;
+  int rollout_len;
+  int since_restart;
+  int sticky_a, sticky_x, sticky_y;
 
   std::map<int, ColorRule> rules;   // colour stepped onto -> what happened
   int rule_target;                  // colour of the square we are stepping onto
@@ -395,8 +414,12 @@ struct Agent {
         trigger_kind(TRIG_NONE), trigger_action(-1), trigger_under(-1),
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
+        explore_mode(2), rollout_len(60), since_restart(0),
+        sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
         replaying(false), restarts(0) {
+    click_x = click_y = -1;
+    click_live = false;
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
@@ -423,6 +446,21 @@ struct Agent {
   }
 
   bool in_bounds(int x, int y) const { return x >= 0 && y >= 0 && x < W && y < H; }
+
+  // How much of the board a colour covers. Measured across the solved public
+  // games, a level ends with the avatar standing on a colour covering under 2%
+  // of the board in 14 of 19 cases, and the objects worth clicking are rare and
+  // small too - so rarity is the best game-independent prior we have for "this
+  // is the thing that matters".
+  std::array<int, 32> color_counts() const {
+    std::array<int, 32> h;
+    h.fill(0);
+    for (int i = 0; i < NCELL; ++i) {
+      int v = cur.c[i];
+      if (v >= 0 && v < 32) ++h[v];
+    }
+    return h;
+  }
 
   Vec best_move(int action, int* count) const {
     std::map<int, std::map<Vec, int> >::const_iterator it = action_moves.find(action);
@@ -465,7 +503,7 @@ struct Agent {
     std::vector<Vec> moveVecs;
     for (size_t i = 0; i < avail.size(); ++i) {
       int a = avail[i];
-      if (a == A5 || a == A7) continue;
+      if (a == A5 || a == A6 || a == A7) continue;
       int cnt = 0;
       Vec v = best_move(a, &cnt);
       if (cnt > 0 && !v.zero()) { moveActions.push_back(a); moveVecs.push_back(v); }
@@ -513,6 +551,26 @@ struct Agent {
       if (!it->second.is_goal()) continue;
       for (int i = 0; i < NCELL; ++i)
         if (cur.c[i] == it->first) t.push_back(i);
+    }
+    return t;
+  }
+
+  // Squares of rare colours, rarest first - the strongest prior we have for
+  // where a level ends when we have not yet seen one end.
+  std::vector<int> rare_targets() {
+    std::array<int, 32> h = color_counts();
+    std::vector<std::pair<int, int> > order;   // (count, colour)
+    for (int c = 0; c < 32; ++c)
+      if (h[c] > 0 && h[c] < NCELL / 50 && c != av_color) order.push_back(std::make_pair(h[c], c));
+    std::sort(order.begin(), order.end());
+    std::vector<int> t;
+    for (size_t k = 0; k < order.size(); ++k) {
+      int col = order[k].second;
+      std::map<int, ColorRule>::const_iterator r = rules.find(col);
+      if (r != rules.end() && r->second.is_wall()) continue;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == col && !touched[i]) t.push_back(i);
+      if (!t.empty()) break;    // deal with the rarest colour present first
     }
     return t;
   }
@@ -577,7 +635,7 @@ struct Agent {
     double best_w = -1e18;
     for (std::map<uint64_t, ArcEntry>::iterator it = level_archive.begin();
          it != level_archive.end(); ++it) {
-      if (it->second.traj.size() > 60) continue;   // too expensive to replay
+      if (int(it->second.traj.size()) > rollout_len) continue;  // too dear to replay
       double w = -double(it->second.visits) * 10.0
                  - double(it->second.traj.size()) * 0.2
                  + double(rng() % 1000) / 1000.0;
@@ -625,7 +683,14 @@ struct Agent {
     bool changed = have_prev ? !(prev == cur) : true;
     std::set<int> bg = background_colors(cur);
 
-    if (have_prev && last_action >= 0 && last_action != A_RESET) {
+    // ACTION6 takes coordinates, so whatever it moved, it did not move it by a
+    // displacement belonging to "ACTION6" - it moved it by something that
+    // depends on where we clicked. Learning a movement vector for it produced
+    // an avatar model for games that have no avatar at all, and with it 1500
+    // imaginary walls on a board of 4096 squares.
+    bool positional = (last_action >= A1 && last_action <= A5) || last_action == A7;
+
+    if (have_prev && positional && last_action != A_RESET) {
       Motion m = detect_translation(prev, cur, bg, av_color);
       if (!m.found && av_color >= 0) {
         // The avatar did not move; maybe something else did, and maybe we are
@@ -690,10 +755,19 @@ struct Agent {
       on_new_level();
     }
 
+    if (have_prev && last_action == A6 && click_x >= 0) {
+      if (changed) {
+        click_live = true;          // still paying off - press it again
+      } else {
+        click_live = false;
+        clicked.insert(click_y * W + click_x);
+      }
+    }
+
     if (have_prev) novelty.note_change(prev, cur);
     // Archive this state under the cheapest route we know to it. Replaying a
     // route costs real actions, so cheaper is strictly better.
-    if (!replaying && level_traj.size() <= 120) {
+    if (!replaying && int(level_traj.size()) <= 4 * rollout_len) {
       uint64_t h = novelty.hash(cur, levels_completed);
       std::map<uint64_t, ArcEntry>::iterator it = level_archive.find(h);
       if (it == level_archive.end()) {
@@ -743,13 +817,39 @@ struct Agent {
     // whether that square was walkable.
     int cnt = 0;
     Vec v = best_move(a, &cnt);
-    if (cnt > 0 && !v.zero() && ax >= 0) {
+    if (cnt > 0 && !v.zero() && ax >= 0 && a != A6) {
       expect_x = ax + v.dx;
       expect_y = ay + v.dy;
       expect_valid = in_bounds(expect_x, expect_y);
       rule_target = expect_valid ? cur.c[expect_y * W + expect_x] : -1;
     }
     return a;
+  }
+
+  // Repeat the last action half the time. In a grid world a run of one
+  // direction goes somewhere; an independent draw each step mostly jitters on
+  // the spot. This is the policy the offline solver uses, and it is what finds
+  // level completions there within a few thousand steps.
+  int sticky_explore(const std::set<int>& bg) {
+    if (click_live && click_x >= 0 && has6) return emit(A6, click_x, click_y);
+    if (sticky_a >= 0 && (rng() % 100) < 50)
+      return emit(sticky_a, sticky_x, sticky_y);
+
+    std::vector<Act> cands;
+    for (size_t i = 0; i < avail.size(); ++i) cands.push_back(Act(avail[i], 0, 0));
+    if (has6) {
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      for (size_t i = 0; i < comps.size() && i < 16; ++i)
+        cands.push_back(Act(A6, comps[i].cx(), comps[i].cy()));
+      for (int i = 0; i < 16; ++i)
+        cands.push_back(Act(A6, int(rng() % W), int(rng() % H)));
+    }
+    if (cands.empty()) return emit(A1, 0, 0);
+    Act a = cands[rng() % cands.size()];
+    sticky_a = a.a; sticky_x = a.x; sticky_y = a.y;
+    if (a.a == A6) { click_x = a.x; click_y = a.y; click_live = false; }
+    return emit(a.a, a.x, a.y);
   }
 
   int choose() {
@@ -787,6 +887,43 @@ struct Agent {
       return emit(a);
     }
 
+    if (explore_mode == 1 && calib_queue.empty() && plan.empty()) {
+      // Pure stochastic mode still uses everything we have learned about where
+      // a level ends; it only replaces the wandering.
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      return sticky_explore(bg);
+    }
+
+    // Systematic Go-Explore: a rollout ends, we go back somewhere promising.
+    if (explore_mode == 3 && !replaying && ++since_restart >= rollout_len) {
+      since_restart = 0;
+      const ArcEntry* t = restart_target();
+      if (t) {
+        restart_from(t);
+        return emit(A_RESET, 0, 0);
+      }
+    }
+    if (explore_mode == 3 && calib_queue.empty() && plan.empty()) {
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      return sticky_explore(bg);
+    }
+
     // 3. Follow the current plan.
     if (!plan.empty()) {
       int a = plan.front();
@@ -808,6 +945,7 @@ struct Agent {
     if (avatar_known && ax >= 0) {
       std::vector<int> p = plan_to(goal_targets());
       if (p.empty()) p = plan_to(pickup_targets());
+      if (p.empty()) p = plan_to(rare_targets());
       if (!p.empty()) {
         plan = p;
         int a = plan.front();
@@ -826,10 +964,10 @@ struct Agent {
       for (size_t i = 0; i < comps.size(); ++i) {
         int key = comps[i].cy() * W + comps[i].cx();
         if (clicked.count(key)) continue;
-        double d = (cols[i] == trig_col ? 0.0 : 50.0)
-                 + std::abs(comps[i].area - trig_area) * 0.5
-                 + std::abs(comps[i].w() - trig_w) * 2.0
-                 + std::abs(comps[i].h() - trig_h) * 2.0;
+        double d = (cols[i] == trig_col ? 0.0 : 8.0)
+                 + std::abs(comps[i].area - trig_area) * 2.0
+                 + std::abs(comps[i].w() - trig_w) * 1.0
+                 + std::abs(comps[i].h() - trig_h) * 1.0;
         if (d < best_d) { best_d = d; best = int(i); }
       }
       if (best >= 0) {
@@ -861,7 +999,9 @@ struct Agent {
     // 5. Directed exploration. Objects first - walking onto or up against a
     //    thing is what changes the world; empty floor almost never is.
     if (avatar_known && ax >= 0) {
-      // Standing on or next to something new? Interact before walking on.
+      // Standing on something new? Interact before walking on - three of the
+      // level completions in the solved games came from ACTION5 while standing
+      // on a rare colour.
       if (std::find(avail.begin(), avail.end(), A5) != avail.end() &&
           !probed5[ay * W + ax]) {
         probed5[ay * W + ax] = 1;
@@ -877,32 +1017,47 @@ struct Agent {
         plan.erase(plan.begin());
         return emit(a);
       }
+      if (explore_mode == 2) return sticky_explore(bg);
       // Fully explored and nothing to interact with: forget the map so the
       // frontier refills, in case the world changed under us.
       visited.fill(0);
       known.fill(UNKNOWN);
     }
 
-    // 6. Click-style game: click object centroids once each, not random pixels.
+    // 6. Click-style game.
     if (has6) {
+      // Still getting a response out of the last spot? Keep pressing it.
+      if (click_live && click_x >= 0) return emit(A6, click_x, click_y);
+
       std::vector<int> cols;
       std::vector<Box> comps = components(cur, bg, &cols);
-      std::vector<std::pair<int, int> > order;  // (-area, index)
-      for (size_t i = 0; i < comps.size(); ++i)
-        order.push_back(std::make_pair(-comps[i].area, int(i)));
+      std::array<int, 32> hist = color_counts();
+      std::vector<std::pair<int, int> > order;  // (cost, index)
+      for (size_t i = 0; i < comps.size(); ++i) {
+        int col = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
+        // Rare colour first, small shape next. Sorting by largest area was
+        // backwards: across every solved public game the object whose click
+        // ended a level covered under 2% of the board and had an area of 40
+        // cells or fewer.
+        order.push_back(std::make_pair(hist[col] * 4 + comps[i].area, int(i)));
+      }
       std::sort(order.begin(), order.end());
       for (size_t i = 0; i < order.size(); ++i) {
         const Box& b = comps[order[i].second];
         int key = b.cy() * W + b.cx();
         if (clicked.count(key)) continue;
-        clicked.insert(key);
-        return emit(A6, b.cx(), b.cy());
+        click_x = b.cx();
+        click_y = b.cy();
+        click_live = false;
+        return emit(A6, click_x, click_y);
       }
       for (int y = 2; y < H; y += 4)
         for (int x = 2; x < W; x += 4) {
           int key = y * W + x;
           if (clicked.count(key)) continue;
-          clicked.insert(key);
+          click_x = x;
+          click_y = y;
+          click_live = false;
           return emit(A6, x, y);
         }
       clicked.clear();
@@ -927,6 +1082,14 @@ ARC3_API int arc3_new(const int* actions, int n) {
   a->init(actions, n);
   g_agents.push_back(a);
   return int(g_agents.size()) - 1;
+}
+
+// Choose the exploration policy: 0 directed, 1 sticky-random, 2 directed then
+// sticky-random. Exposed so the two can be measured against each other rather
+// than argued about.
+ARC3_API void arc3_set_explore(int h, int mode) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->explore_mode = mode;
 }
 
 ARC3_API void arc3_free(int h) {

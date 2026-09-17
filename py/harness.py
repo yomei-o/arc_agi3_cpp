@@ -70,7 +70,8 @@ def score_game(baselines: list[int], level_actions: list[int], levels_completed:
     return {"game_score": min(score, 100.0 * earned_w / total_w), "per_level": per_level}
 
 
-def play_one(agent_path: str, game_id: str, max_actions: int, render: str | None) -> dict:
+def play_one(agent_path: str, game_id: str, max_actions: int, render: str | None,
+             force_budget: int = 0) -> dict:
     import arc_agi
     from arc_agi import OperationMode
     logging.getLogger().setLevel(logging.ERROR)
@@ -85,7 +86,11 @@ def play_one(agent_path: str, game_id: str, max_actions: int, render: str | None
     # Read the human baselines only after make(), which is what downloads the
     # game (and its metadata.json) on first use.
     baselines = _baselines(game_id)
+    # The real budget is 5x the human baseline summed over levels. force_budget
+    # overrides it, to separate "cannot do it" from "ran out of actions".
     budget = min(sum(5 * b for b in baselines) if baselines else max_actions, max_actions)
+    if force_budget:
+        budget = force_budget
 
     AgentCls = _load_agent_class(Path(agent_path))
     AgentCls.MAX_ACTIONS = budget
@@ -141,6 +146,8 @@ def main() -> None:
     ap.add_argument("--games", default=None, help="comma list; default = all")
     ap.add_argument("--max-actions", type=int, default=100_000)
     ap.add_argument("--jobs", type=int, default=1)
+    ap.add_argument("--force-budget", type=int, default=0,
+                    help="ignore the 5x-human budget and give every game this many actions")
     ap.add_argument("--render", default=None)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -166,13 +173,15 @@ def main() -> None:
     results = []
     if args.jobs > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-            futs = {ex.submit(play_one, agent_path, g, args.max_actions, None): g for g in games}
+            futs = {ex.submit(play_one, agent_path, g, args.max_actions, None,
+                              args.force_budget): g for g in games}
             for f in as_completed(futs):
                 r = f.result(); results.append(r)
                 print(_line(r), flush=True)
     else:
         for g in games:
-            r = play_one(agent_path, g, args.max_actions, args.render); results.append(r)
+            r = play_one(agent_path, g, args.max_actions, args.render, args.force_budget)
+            results.append(r)
             print(_line(r), flush=True)
 
     results.sort(key=lambda r: r["game_id"])

@@ -100,6 +100,7 @@ def _build_core() -> ctypes.CDLL | None:
                                 ctypes.POINTER(ctypes.c_int)]
     dll.arc3_choose.restype = ctypes.c_int
     dll.arc3_stats.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
 
@@ -156,6 +157,9 @@ class MyAgent(Agent):
         if core is not None:
             arr = (ctypes.c_int * len(acts))(*acts)
             self._h = core.arc3_new(arr, len(acts))
+            # 0 directed, 1 sticky-random, 2 mixed, 3 systematic Go-Explore.
+            # Measured on the 25 public games: 0 scores 0.12, the others 0.00.
+            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "0")))
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
