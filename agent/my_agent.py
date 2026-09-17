@@ -781,7 +781,7 @@ struct Agent {
     for (std::map<int, ColorRule>::iterator it = rules.begin(); it != rules.end(); ++it) {
       if (!it->second.is_goal()) continue;
       for (int i = 0; i < NCELL; ++i)
-        if (cur.c[i] == it->first) t.push_back(i);
+        if (cur.c[i] == it->first && !touched[i]) t.push_back(i);
     }
     return t;
   }
@@ -946,6 +946,13 @@ struct Agent {
         adopt(m);
         known[ay * W + ax] = FREE;
         visited[ay * W + ax] = 1;
+        // Standing somewhere counts as having tried it. Without this the agent
+        // walks to the same goal-coloured square forever: on LS20 it learned
+        // the right colour from level 1 and then spent 3,794 of its 3,881
+        // actions walking to squares of that colour on level 2, never
+        // searching again - the search counter stayed at zero for the whole
+        // game.
+        mark_touched(ay * W + ax);
         if (reacquire > 0) reacquire = 0;
       } else if (expect_valid && ax >= 0) {
         if (rule_target >= 0) ++rules[rule_target].blocked;
@@ -1346,7 +1353,15 @@ struct Agent {
       return sticky_explore(bg);
     }
 
-if (explore_mode == 6 && ge_ready && !idd_actions.empty()) {
+    // The alphabet is built when a level starts, and the first level of a game
+    // starts before any level transition has happened - so without this the
+    // search never ran at all, and every sweep of its parameters came back
+    // identical because none of that code was being reached.
+    if ((explore_mode == 5 || explore_mode == 6) && idd_actions.empty() &&
+        calib_queue.empty() && have_scene)
+      idd_begin();
+
+    if (explore_mode == 6 && ge_ready && !idd_actions.empty()) {
       if (replaying) {
         if (!replay_queue.empty()) {
           Act a = replay_queue.front();
