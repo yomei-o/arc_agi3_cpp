@@ -255,6 +255,7 @@ struct Agent {
   std::array<uint8_t, NCELL> known;
   std::array<uint8_t, NCELL> visited;
   std::array<uint8_t, NCELL> probed5;
+  std::array<uint8_t, NCELL> touched;   // objects we have already walked to
   std::set<int> clicked;
 
   std::vector<int> plan;
@@ -281,6 +282,7 @@ struct Agent {
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
+    touched.fill(0);
   }
 
   void init(const int* actions, int n) {
@@ -386,12 +388,34 @@ struct Agent {
     return t;
   }
 
+  // Objects are far more informative than empty floor, so we walk to them
+  // first. Anything the avatar cannot reach - the HUD, the inventory panel -
+  // drops out on its own, because the route search never gets there.
+  std::vector<int> object_targets(const std::set<int>& bg) {
+    std::vector<int> t;
+    for (int i = 0; i < NCELL; ++i) {
+      int col = cur.c[i];
+      if (bg.count(col) || col == av_color) continue;
+      if (touched[i] || known[i] == BLOCKED) continue;
+      t.push_back(i);
+    }
+    return t;
+  }
+
+  // Mark the object we just reached, and its whole shape, as dealt with.
+  void mark_touched(int idx) {
+    std::vector<int> cells;
+    component_at(cur, idx, &cells);
+    for (size_t i = 0; i < cells.size(); ++i) touched[cells[i]] = 1;
+  }
+
   void on_new_level() {
     // Geometry changed; keep the action model and the winning trigger, drop the
     // map and re-acquire the avatar from its next movement.
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
+    touched.fill(0);
     clicked.clear();
     plan.clear();
     ax = ay = -1;
@@ -424,12 +448,16 @@ struct Agent {
         visited[ay * W + ax] = 1;
         if (reacquire > 0) reacquire = 0;
       } else if (expect_valid && ax >= 0) {
-        // We asked it to move and it stayed put: that square is not walkable.
+        // We asked it to move and it stayed put: that square is not walkable,
+        // and every step queued behind it was computed on a stale map.
         if (in_bounds(expect_x, expect_y)) {
-          known[expect_y * W + expect_x] = BLOCKED;
-          ++blocked_marks;
+          int b = expect_y * W + expect_x;
+          if (known[b] != BLOCKED) ++blocked_marks;
+          known[b] = BLOCKED;
+          mark_touched(b);   // whatever is standing there, we have met it
         }
         visited[ay * W + ax] = 1;
+        plan.clear();
       }
     }
     expect_valid = false;
@@ -505,20 +533,24 @@ struct Agent {
       }
     }
 
-    // 5. Directed exploration: shortest path to a square we have not stood on.
+    // 5. Directed exploration. Objects first - walking onto or up against a
+    //    thing is what changes the world; empty floor almost never is.
     if (avatar_known && ax >= 0) {
-      std::vector<int> p = plan_to(frontier_targets());
+      // Standing on or next to something new? Interact before walking on.
+      if (std::find(avail.begin(), avail.end(), A5) != avail.end() &&
+          !probed5[ay * W + ax]) {
+        probed5[ay * W + ax] = 1;
+        return emit(A5);
+      }
+      mark_touched(ay * W + ax);
+
+      std::vector<int> p = plan_to(object_targets(bg));
+      if (p.empty()) p = plan_to(frontier_targets());
       if (!p.empty()) {
         plan = p;
         int a = plan.front();
         plan.erase(plan.begin());
         return emit(a);
-      }
-      // Nowhere left to walk: try the context action where we stand.
-      if (std::find(avail.begin(), avail.end(), A5) != avail.end() &&
-          !probed5[ay * W + ax]) {
-        probed5[ay * W + ax] = 1;
-        return emit(A5);
       }
       // Fully explored and nothing to interact with: forget the map so the
       // frontier refills, in case the world changed under us.
@@ -612,4 +644,7 @@ ARC3_API void arc3_stats(int h, int* out) {
   out[9] = a->av_h;
   out[10] = int(a->plan.size());
   out[11] = a->stagnant;
+  int nt = 0;
+  for (int i = 0; i < NCELL; ++i) nt += a->touched[i] ? 1 : 0;
+  out[12] = nt;
 }

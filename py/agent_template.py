@@ -49,24 +49,43 @@ def _build_core() -> ctypes.CDLL | None:
     lib = outdir / f"arc3_core_{tag}{ext}"
 
     if not lib.exists():
-        cpp = outdir / f"arc3_core_{tag}.cpp"
+        # Build to a private name and rename into place: several evaluation
+        # processes run in parallel and must not half-read each other's output.
+        cpp = outdir / f"arc3_core_{tag}_{os.getpid()}.cpp"
         cpp.write_text(src, encoding="utf-8")
+        tmp = outdir / f"arc3_core_{tag}_{os.getpid()}.building{ext}"
         cmd = ["g++", "-O2", "-std=c++17", "-shared"]
         if sys.platform != "win32":
             cmd.append("-fPIC")
-        cmd += [str(cpp), "-o", str(lib)]
+        cmd += [str(cpp), "-o", str(tmp)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
                 print(f"[arc3] g++ failed, falling back to Python:\n{r.stderr[:800]}",
                       file=sys.stderr)
                 return None
+            try:
+                os.replace(tmp, lib)
+            except OSError:
+                # Someone else won the race; their build is byte-identical.
+                pass
         except Exception as e:  # g++ missing, timeout, ...
             print(f"[arc3] cannot build core ({e}); falling back to Python", file=sys.stderr)
             return None
+        finally:
+            for f in (cpp, tmp):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
 
+    # Windows keeps a loaded DLL locked, which would block the next build, so
+    # every process loads its own copy.
+    private = outdir / f"arc3_core_{tag}_p{os.getpid()}{ext}"
     try:
-        dll = ctypes.CDLL(str(lib))
+        if not private.exists():
+            private.write_bytes(lib.read_bytes())
+        dll = ctypes.CDLL(str(private))
     except OSError as e:
         print(f"[arc3] cannot load core ({e}); falling back to Python", file=sys.stderr)
         return None
@@ -171,9 +190,17 @@ class MyAgent(Agent):
             action.reasoning = "arc3_core"
         return action
 
+    # Filled in on cleanup so an evaluation run can report what the core
+    # actually worked out about each game, not just the score.
+    STAT_NAMES = ("avatar_known", "avatar_color", "ax", "ay", "steps", "levels",
+                  "trigger", "blocked", "av_w", "av_h", "plan", "stagnant", "touched")
+
     def cleanup(self, *args: Any, **kwargs: Any) -> None:
         core = _core()
         if core is not None and self._h >= 0:
+            buf = (ctypes.c_int * 16)()
+            core.arc3_stats(self._h, buf)
+            self.final_stats = dict(zip(self.STAT_NAMES, list(buf)))
             core.arc3_free(self._h)
             self._h = -1
         super().cleanup(*args, **kwargs)

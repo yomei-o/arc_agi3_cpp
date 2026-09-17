@@ -102,10 +102,22 @@ def play_one(agent_path: str, game_id: str, max_actions: int, render: str | None
 
     final = agent.frames[-1]
     res = score_game(baselines, level_actions, final.levels_completed)
+    core_stats = getattr(agent, "final_stats", None)
     return {"game_id": game_id.split("-")[0], "levels_completed": final.levels_completed,
+            "core": core_stats, "actions_avail": [int(a) for a in (final.available_actions or [])],
             "n_levels": len(baselines), "actions": agent.action_counter, "budget": budget,
             "level_actions": level_actions, "baselines": baselines, "seconds": round(dt, 1),
             "state": str(final.state), "error": err, **res}
+
+
+def _line(r: dict) -> str:
+    c = r.get("core") or {}
+    av = "avatar" if c.get("avatar_known") else "  --  "
+    return (f"  {r['game_id']:6} lv={r.get('levels_completed',0)}/{r.get('n_levels','?')} "
+            f"act={r.get('actions',0):6} score={r.get('game_score',0):6.2f} "
+            f"| {av} c={c.get('avatar_color','?'):>3} {c.get('av_w','?')}x{c.get('av_h','?')} "
+            f"blocked={c.get('blocked','?'):>4} touched={c.get('touched','?'):>4} "
+            f"acts={r.get('actions_avail')}")
 
 
 def main() -> None:
@@ -132,15 +144,11 @@ def main() -> None:
             futs = {ex.submit(play_one, agent_path, g, args.max_actions, None): g for g in games}
             for f in as_completed(futs):
                 r = f.result(); results.append(r)
-                print(f"  {r['game_id']:6} lv={r.get('levels_completed',0)}/{r.get('n_levels','?')} "
-                      f"act={r.get('actions',0):6} score={r.get('game_score',0):6.2f}  ({r.get('seconds',0)}s)",
-                      flush=True)
+                print(_line(r), flush=True)
     else:
         for g in games:
             r = play_one(agent_path, g, args.max_actions, args.render); results.append(r)
-            print(f"  {r['game_id']:6} lv={r.get('levels_completed',0)}/{r.get('n_levels','?')} "
-                  f"act={r.get('actions',0):6} score={r.get('game_score',0):6.2f}  ({r.get('seconds',0)}s)",
-                  flush=True)
+            print(_line(r), flush=True)
 
     results.sort(key=lambda r: r["game_id"])
     final = sum(r.get("game_score", 0.0) for r in results) / max(len(results), 1)
