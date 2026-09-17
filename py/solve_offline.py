@@ -59,13 +59,26 @@ def quiet() -> None:
 # ---------------------------------------------------------------------------
 # Perception helpers
 # ---------------------------------------------------------------------------
+def safe_step(env, action: GameAction, data: dict | None = None):
+    """Step, tolerating a game that throws.
+
+    Some games raise from inside their own logic on particular actions (seen:
+    "qoljprchpbb not attached to oegtnpbqims" on an ACTION6). A search that
+    explores every action will find those, and one of them must not end the run.
+    """
+    try:
+        return env.step(action, data=data or {})
+    except Exception:
+        return None
+
+
 def frame_of(obs) -> np.ndarray | None:
     if obs is None or not obs.frame:
         return None
     return np.asarray(obs.frame[-1], dtype=np.int8)
 
 
-def hud_mask(arc, game_id: str, rollouts: int = 4, length: int = 80) -> np.ndarray:
+def hud_mask(fresh, rollouts: int = 4, length: int = 80) -> np.ndarray:
     """Clock cells: they advance with the step index whatever we do.
 
     Run several *different* random rollouts of equal length from a full reset
@@ -84,18 +97,16 @@ def hud_mask(arc, game_id: str, rollouts: int = 4, length: int = 80) -> np.ndarr
     """
     seqs = []
     for r in range(rollouts):
-        env = arc.make(game_id)
-        env.step(GameAction.RESET)
+        env = fresh()
         rng = random.Random(1000 + r)
         acts = [a for a in env.action_space if not a.is_complex()]
         frames = []
         for _ in range(length):
             if acts:
-                a = rng.choice(acts)
-                o = env.step(a)
+                o = safe_step(env, rng.choice(acts))
             else:
-                o = env.step(GameAction.ACTION6,
-                             data={"x": rng.randrange(64), "y": rng.randrange(64)})
+                o = safe_step(env, GameAction.ACTION6,
+                              {"x": rng.randrange(64), "y": rng.randrange(64)})
             f = frame_of(o)
             if f is None:
                 break
@@ -115,20 +126,29 @@ def hud_mask(arc, game_id: str, rollouts: int = 4, length: int = 80) -> np.ndarr
     return same & varies
 
 
-def action_candidates(env, frame: np.ndarray, rng: random.Random, max_clicks: int = 24):
-    """Legal actions, with ACTION6 aimed at objects instead of random pixels.
+def action_candidates(env, frame: np.ndarray, rng: random.Random, max_clicks: int = 16):
+    """Legal actions, with sensible targets for the coordinate action.
 
-    A 64x64 click space would swamp the search; the interesting targets are the
-    objects, so we offer each connected component's centroid plus a coarse grid
-    as a fallback.
+    A 64x64 click space would swamp the search, so object centroids are offered
+    as a prior - but only as a prior. On FT09 a centroid-only candidate set
+    produced an archive of ONE state in 30k steps while uniform random clicking
+    reached 14 distinct frames in 300, because what that game responds to is not
+    the middle of a shape. Centroids plus random coordinates keeps the useful
+    bias without inheriting its blind spot.
     """
     out = []
+    complex_ok = False
     for a in env.action_space:
-        if not a.is_complex():
+        if a.is_complex():
+            complex_ok = True
+        else:
             out.append((a.value, 0, 0))
-    if any(a.is_complex() for a in env.action_space) and frame is not None:
-        for (x, y) in object_centroids(frame)[:max_clicks]:
-            out.append((6, x, y))
+    if complex_ok:
+        if frame is not None:
+            for (x, y) in object_centroids(frame)[:max_clicks]:
+                out.append((6, x, y))
+        for _ in range(max_clicks):
+            out.append((6, rng.randrange(64), rng.randrange(64)))
     return out
 
 
@@ -201,8 +221,14 @@ class Solver:
         self.game = game
         self.arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
         self.rng = random.Random(seed)
-        self.mask = hud_mask(self.arc, game)
-        self.env = self.arc.make(game)
+        # Build the environment exactly once. arc.make() contacts the ARC API,
+        # and calling it per restore had 14 workers hammering the service into
+        # SSL failures; a deepcopy of the freshly reset game is equivalent and
+        # needs no network at all.
+        base = self.arc.make(game)
+        base.step(GameAction.RESET)          # action_count == 0 => full reset
+        self.root = copy.deepcopy(base)
+        self.mask = hud_mask(lambda: copy.deepcopy(self.root))
         self.archive: dict[bytes, Entry] = {}
         self.snaps: OrderedDict[bytes, object] = OrderedDict()
         self.snap_cache = snap_cache
@@ -224,13 +250,14 @@ class Solver:
             self.snaps.move_to_end(e.key, last=True)
             env = copy.deepcopy(e.snap)
             return env, env._last_response
-        env = self.arc.make(self.game)
-        env.step(GameAction.RESET)  # action_count == 0 => full reset
-        obs = None
+        env = copy.deepcopy(self.root)
+        obs = env._last_response
         for a, x, y in unpack(e.traj):
             act = BY_VALUE[a]
-            obs = env.step(act, data={"x": x, "y": y} if act.is_complex() else {})
+            obs = safe_step(env, act, {"x": x, "y": y} if act.is_complex() else {})
             self.replayed += 1
+            if obs is None:
+                break
         return env, obs
 
     def remember(self, e: "Entry", env) -> None:
@@ -247,9 +274,10 @@ class Solver:
             old.snap = None
 
     # -- main loop --------------------------------------------------------
-    def run(self, budget_steps: int, explore_len: int = 40, verbose: bool = False) -> dict:
-        env = self.arc.make(self.game)
-        obs = env.step(GameAction.RESET)
+    def run(self, budget_steps: int, explore_len: int = 40, verbose: bool = False,
+            outdir: Path | None = None, compress_rounds: int = 400) -> dict:
+        env = copy.deepcopy(self.root)
+        obs = env._last_response
         f = frame_of(obs)
         if f is None:
             return {"game": self.game, "error": "no initial frame"}
@@ -289,8 +317,10 @@ class Solver:
                     a, x, y = self.rng.choice(cands)
                 last = (a, x, y)
                 act = BY_VALUE[a]
-                obs = env.step(act, data={"x": x, "y": y} if act.is_complex() else {})
+                obs = safe_step(env, act, {"x": x, "y": y} if act.is_complex() else {})
                 self.steps += 1
+                if obs is None:
+                    break          # this action broke the game; abandon the rollout
                 traj = traj + [(a, x, y)]
 
                 if obs is None:
@@ -302,8 +332,10 @@ class Solver:
                     self.game_overs += 1
                     # Only RESET is legal now; it restarts this level and keeps
                     # the levels we already finished.
-                    obs = env.step(GameAction.RESET)
+                    obs = safe_step(env, GameAction.RESET)
                     self.steps += 1
+                    if obs is None:
+                        break
                     traj = traj + [(GameAction.RESET.value, 0, 0)]
                     frame = frame_of(obs)
                     if frame is None:
@@ -315,9 +347,12 @@ class Solver:
 
                 if levels > self.max_levels:
                     self.max_levels = levels
-                    if verbose:
-                        print(f"    [{self.game}] level {levels} at {len(traj)} actions "
-                              f"({self.steps} sim steps, {time.time() - t0:.0f}s)", flush=True)
+                    print(f"    [{self.game}] level {levels} at {len(traj)} actions "
+                          f"({self.steps} sim steps, {time.time() - t0:.0f}s)", flush=True)
+                    if outdir is not None:
+                        self.best_by_level[levels] = list(traj)
+                        (outdir / f"{self.game}.json").write_text(
+                            json.dumps(self.report(time.time() - t0), indent=1))
                 if levels not in self.best_by_level or len(traj) < len(self.best_by_level[levels]):
                     self.best_by_level[levels] = list(traj)
 
@@ -338,7 +373,7 @@ class Solver:
                 if obs.state is GameState.WIN:
                     break
 
-        return self.report(time.time() - t0)
+        return self.report(time.time() - t0, compress_rounds=compress_rounds)
 
     def select(self) -> Entry:
         """Prefer deep progress, then rarely-visited and cheap-to-restore states."""
@@ -355,7 +390,93 @@ class Solver:
         best.visits += 1
         return best
 
-    def report(self, seconds: float) -> dict:
+    # -- solution compression --------------------------------------------
+    def simulate(self, traj: list[tuple[int, int, int]], want_levels: int) -> bool:
+        """Does this exact action sequence still finish `want_levels` levels?"""
+        env = copy.deepcopy(self.root)
+        for a, x, y in traj:
+            act = BY_VALUE[a]
+            obs = safe_step(env, act, {"x": x, "y": y} if act.is_complex() else {})
+            self.replayed += 1
+            if obs is None:
+                return False
+            if int(obs.levels_completed) >= want_levels:
+                return True
+        return False
+
+    def state_trace(self, traj: list[tuple[int, int, int]]) -> list[bytes]:
+        """The archive key after each action, for spotting loops."""
+        env = copy.deepcopy(self.root)
+        out = []
+        for a, x, y in traj:
+            act = BY_VALUE[a]
+            obs = safe_step(env, act, {"x": x, "y": y} if act.is_complex() else {})
+            self.replayed += 1
+            if obs is None:
+                break
+            f = frame_of(obs)
+            out.append(self.key(f, int(obs.levels_completed)) if f is not None else b"")
+        return out
+
+    def compress(self, traj: list[tuple[int, int, int]], want_levels: int,
+                 rounds: int = 400) -> list[tuple[int, int, int]]:
+        """Shorten a solution, because the score is quadratic in its length.
+
+        Go-Explore finds A route; the first one it finds wanders. Two passes:
+        first remove loops exactly - any stretch that begins and ends in the
+        same state can go, since the game is deterministic - then try deleting
+        random chunks and keep whatever still wins.
+        """
+        best = list(traj)
+
+        # Exact loop removal: identical state keys mean an identical situation.
+        trace = self.state_trace(best)
+        first: dict[bytes, int] = {}
+        cut = []
+        i = 0
+        while i < len(trace):
+            k = trace[i]
+            if k and k in first:
+                cut.append((first[k] + 1, i + 1))
+                i += 1
+                continue
+            first[k] = i
+            i += 1
+        for lo, hi in reversed(cut):
+            cand = best[:lo] + best[hi:]
+            if cand and self.simulate(cand, want_levels):
+                best = cand
+
+        # Then chip away at what is left.
+        for _ in range(rounds):
+            if len(best) <= 1:
+                break
+            span = self.rng.randint(1, max(1, min(12, len(best) // 3)))
+            i = self.rng.randrange(0, len(best) - span + 1)
+            cand = best[:i] + best[i + span:]
+            if cand and self.simulate(cand, want_levels):
+                best = cand
+        return best
+
+    def report(self, seconds: float, compress_rounds: int = 0) -> dict:
+        # The archive holds the cheapest route to every state, including the
+        # states that sit just past a level boundary, so it knows shorter
+        # solutions than whichever route happened to get there first.
+        for e in self.archive.values():
+            if e.levels <= 0:
+                continue
+            cur = self.best_by_level.get(e.levels)
+            if cur is None or len(e.traj) // 3 < len(cur):
+                self.best_by_level[e.levels] = unpack(e.traj)
+        if compress_rounds:
+            for L in sorted(self.best_by_level):
+                if L <= 0:
+                    continue
+                before = len(self.best_by_level[L])
+                self.best_by_level[L] = self.compress(
+                    self.best_by_level[L], L, rounds=compress_rounds)
+                print(f"    [{self.game}] level {L}: {before} -> "
+                      f"{len(self.best_by_level[L])} actions", flush=True)
         levels = sorted(self.best_by_level)
         per_level: dict[str, int] = {}
         for e in self.archive.values():
@@ -375,10 +496,12 @@ class Solver:
         }
 
 
-def solve(game: str, budget: int, seed: int, explore_len: int, verbose: bool) -> dict:
+def solve(game: str, budget: int, seed: int, explore_len: int, verbose: bool,
+          outdir: str | None = None) -> dict:
     try:
         s = Solver(game, seed=seed)
-        return s.run(budget, explore_len=explore_len, verbose=verbose)
+        return s.run(budget, explore_len=explore_len, verbose=verbose,
+                     outdir=Path(outdir) if outdir else None)
     except Exception:
         import traceback
         return {"game": game, "error": traceback.format_exc(limit=8)}
@@ -417,13 +540,13 @@ def main() -> None:
     if args.jobs > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
         with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-            futs = [ex.submit(solve, g, args.budget, args.seed, args.explore_len, False)
-                    for g in games]
+            futs = [ex.submit(solve, g, args.budget, args.seed, args.explore_len, False,
+                              str(outdir)) for g in games]
             for f in as_completed(futs):
                 finish(f.result())
     else:
         for g in games:
-            finish(solve(g, args.budget, args.seed, args.explore_len, True))
+            finish(solve(g, args.budget, args.seed, args.explore_len, True, str(outdir)))
 
 
 if __name__ == "__main__":

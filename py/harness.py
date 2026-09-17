@@ -40,9 +40,19 @@ def _baselines(game_id: str) -> list[int]:
 
 
 def score_game(baselines: list[int], level_actions: list[int], levels_completed: int) -> dict:
-    """level_actions[i] = actions spent on level i (completed ones first)."""
+    """level_actions[i] = actions spent on level i (completed ones first).
+
+    Mirrors EnvironmentScoreCalculator in arc_agi/scorecard.py. Two details that
+    are easy to get wrong and change what is worth optimising:
+      * the denominator is the weight of EVERY level in the game, not just the
+        levels attempted, so unfinished levels really do cost their full share
+      * the per-level cap of 1.15 can be clipped again at the game level: the
+        score cannot exceed the fraction of total weight actually completed, so
+        beating the human baseline on one level cannot pay for skipping another
+    """
     total_w = sum(range(1, len(baselines) + 1))
     got = 0.0
+    earned_w = 0
     per_level = []
     for i, base in enumerate(baselines):
         w = i + 1
@@ -52,7 +62,12 @@ def score_game(baselines: list[int], level_actions: list[int], levels_completed:
             s = 0.0
         per_level.append(round(s, 4))
         got += s * w
-    return {"game_score": 100.0 * got / total_w if total_w else 0.0, "per_level": per_level}
+        if s > 0:
+            earned_w += w
+    if not total_w:
+        return {"game_score": 0.0, "per_level": per_level}
+    score = 100.0 * got / total_w
+    return {"game_score": min(score, 100.0 * earned_w / total_w), "per_level": per_level}
 
 
 def play_one(agent_path: str, game_id: str, max_actions: int, render: str | None) -> dict:

@@ -207,6 +207,23 @@ struct NoveltyIndex {
   int visit(const Grid& g, int levels) { return seen[hash(g, levels)]++; }
 };
 
+// What happens when the avatar tries to step onto a square of a given colour.
+//
+// This is the part that is meant to survive into a game nobody has seen. The
+// meaning of a game is not knowable in advance, but "I walked into a red square
+// and the level ended" is measurable, and the levels of one game share their
+// mechanics. Learn the table on level 1 - which is weighted 1 out of 28 and so
+// costs almost nothing to spend - and levels 2..N can be walked straight to
+// their goal, which is where the weight, and the score, actually is.
+struct ColorRule {
+  int blocked, passed, collected, completed;
+  ColorRule() : blocked(0), passed(0), collected(0), completed(0) {}
+  int trials() const { return blocked + passed + collected + completed; }
+  bool is_wall() const { return blocked > 0 && passed + collected + completed == 0; }
+  bool is_goal() const { return completed > 0; }
+  bool is_pickup() const { return collected > passed; }
+};
+
 // One issued action, so a route through a level can be replayed.
 struct Act {
   int a, x, y;
@@ -352,6 +369,9 @@ struct Agent {
   int blocked_marks;
   int reacquire;  // countdown of probe moves used to find the avatar again
 
+  std::map<int, ColorRule> rules;   // colour stepped onto -> what happened
+  int rule_target;                  // colour of the square we are stepping onto
+
   NoveltyIndex novelty;
   int repeats;    // consecutive choices made from an already-seen state
   int escalation; // 0 walk, 1 interact everywhere, 2 click, 3 restart the level
@@ -375,7 +395,8 @@ struct Agent {
         trigger_kind(TRIG_NONE), trigger_action(-1), trigger_under(-1),
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
-        repeats(0), escalation(0), last_state(0), replaying(false), restarts(0) {
+        rule_target(-1), repeats(0), escalation(0), last_state(0),
+        replaying(false), restarts(0) {
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
@@ -468,6 +489,8 @@ struct Agent {
         if (!in_bounds(nx, ny)) continue;
         int k = ny * W + nx;
         if (vis[k] || known[k] == BLOCKED) continue;
+        std::map<int, ColorRule>::const_iterator r = rules.find(cur.c[k]);
+        if (r != rules.end() && r->second.is_wall()) continue;
         vis[k] = 1;
         par[k] = cell;
         pact[k] = moveActions[m];
@@ -480,6 +503,29 @@ struct Agent {
     std::reverse(seq.begin(), seq.end());
     if (seq.size() > 30) seq.resize(30);
     return seq;
+  }
+
+  // Squares whose colour has ended a level before. Once level 1 has taught us
+  // this, the rest of the game is a shortest-path problem.
+  std::vector<int> goal_targets() {
+    std::vector<int> t;
+    for (std::map<int, ColorRule>::iterator it = rules.begin(); it != rules.end(); ++it) {
+      if (!it->second.is_goal()) continue;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == it->first) t.push_back(i);
+    }
+    return t;
+  }
+
+  // Things that vanished when walked into - collectables, most likely.
+  std::vector<int> pickup_targets() {
+    std::vector<int> t;
+    for (std::map<int, ColorRule>::iterator it = rules.begin(); it != rules.end(); ++it) {
+      if (!it->second.is_pickup() || it->second.is_goal()) continue;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == it->first && !touched[i]) t.push_back(i);
+    }
+    return t;
   }
 
   // Lattice squares we have not stood on yet, nearest first via the BFS above.
@@ -588,6 +634,12 @@ struct Agent {
       }
 
       if (m.found) {
+        if (rule_target >= 0) {
+          ColorRule& r = rules[rule_target];
+          if (levels_completed > levels) ++r.completed;
+          else if (cur.c[expect_y * W + expect_x] != rule_target) ++r.collected;
+          else ++r.passed;
+        }
         action_moves[last_action][m.disp] += 1;
         ++av_support;
         if (av_support >= 2) avatar_known = true;
@@ -596,6 +648,7 @@ struct Agent {
         visited[ay * W + ax] = 1;
         if (reacquire > 0) reacquire = 0;
       } else if (expect_valid && ax >= 0) {
+        if (rule_target >= 0) ++rules[rule_target].blocked;
         // We asked it to move and it stayed put: that square is not walkable,
         // and every step queued behind it was computed on a stale map.
         if (in_bounds(expect_x, expect_y)) {
@@ -611,9 +664,15 @@ struct Agent {
     expect_valid = false;
 
     if (levels_completed > levels) {
+      // Finishing a level repaints the whole board, so the avatar's move is not
+      // detectable on this frame and the rule above never fires. Record it here
+      // instead: the square we were stepping onto is what ended the level, and
+      // that is the single most valuable thing to know for levels 2..N.
+      if (rule_target >= 0) ++rules[rule_target].completed;
       levels = levels_completed;
       trigger_action = last_action;
       trigger_valid = true;
+      rule_target = -1;
       if (last_action == A6 && have_prev) {
         // Describe the thing we clicked, in the frame as it was before the
         // click, so the same kind of thing can be found in the next level.
@@ -661,6 +720,7 @@ struct Agent {
       if (escalation >= 2) clicked.clear();
     }
 
+    rule_target = -1;
     if (ax >= 0 && ay >= 0 && have_prev) last_under = prev.at(ax, ay);
     stagnant = changed ? 0 : stagnant + 1;
     have_prev = true;
@@ -686,7 +746,8 @@ struct Agent {
     if (cnt > 0 && !v.zero() && ax >= 0) {
       expect_x = ax + v.dx;
       expect_y = ay + v.dy;
-      expect_valid = true;
+      expect_valid = in_bounds(expect_x, expect_y);
+      rule_target = expect_valid ? cur.c[expect_y * W + expect_x] : -1;
     }
     return a;
   }
@@ -740,6 +801,19 @@ struct Agent {
     if (escalation >= 3) {
       restart_from(restart_target());
       return emit(A_RESET, 0, 0);
+    }
+
+    // 4. We know what ends a level here: walk to it. This is the whole point
+    //    of spending level 1 on exploration.
+    if (avatar_known && ax >= 0) {
+      std::vector<int> p = plan_to(goal_targets());
+      if (p.empty()) p = plan_to(pickup_targets());
+      if (!p.empty()) {
+        plan = p;
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
     }
 
     // 4a. The previous level ended on a click: find the thing that looks most
@@ -897,4 +971,13 @@ ARC3_API void arc3_stats(int h, int* out) {
   out[13] = a->escalation;
   out[14] = int(a->novelty.seen.size());
   out[15] = a->restarts;
+  int goals = 0, walls = 0;
+  for (std::map<int, ColorRule>::const_iterator it = a->rules.begin();
+       it != a->rules.end(); ++it) {
+    if (it->second.is_goal()) ++goals;
+    if (it->second.is_wall()) ++walls;
+  }
+  out[16] = int(a->rules.size());
+  out[17] = goals;
+  out[18] = walls;
 }

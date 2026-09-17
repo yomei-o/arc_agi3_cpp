@@ -44,7 +44,7 @@ AgentCls.MAX_ACTIONS = args.steps
 agent = AgentCls(card_id="dbg", game_id=args.game, agent_name="dbg",
                  ROOT_URL="http://localhost", record=False, arc_env=env, tags=["dbg"])
 
-stats = (ctypes.c_int * 16)()
+stats = (ctypes.c_int * 32)()
 action_hist = Counter()
 step = 0
 
@@ -53,7 +53,9 @@ def dump(tag: str) -> None:
     if core is None or agent._h < 0:
         return
     core.arc3_stats(agent._h, stats)
-    names = ["known", "color", "ax", "ay", "steps", "levels", "trig", "blocked", "w", "h", "plan", "stag"]
+    names = ["known", "color", "ax", "ay", "steps", "levels", "trig", "blocked",
+             "w", "h", "plan", "stag", "touched", "esc", "states", "restarts",
+             "rules", "goals", "walls"]
     print(f"  [{tag}] " + "  ".join(f"{n}={stats[i]}" for i, n in enumerate(names)))
 
 

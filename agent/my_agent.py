@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +239,23 @@ struct NoveltyIndex {
   int visit(const Grid& g, int levels) { return seen[hash(g, levels)]++; }
 };
 
+// What happens when the avatar tries to step onto a square of a given colour.
+//
+// This is the part that is meant to survive into a game nobody has seen. The
+// meaning of a game is not knowable in advance, but "I walked into a red square
+// and the level ended" is measurable, and the levels of one game share their
+// mechanics. Learn the table on level 1 - which is weighted 1 out of 28 and so
+// costs almost nothing to spend - and levels 2..N can be walked straight to
+// their goal, which is where the weight, and the score, actually is.
+struct ColorRule {
+  int blocked, passed, collected, completed;
+  ColorRule() : blocked(0), passed(0), collected(0), completed(0) {}
+  int trials() const { return blocked + passed + collected + completed; }
+  bool is_wall() const { return blocked > 0 && passed + collected + completed == 0; }
+  bool is_goal() const { return completed > 0; }
+  bool is_pickup() const { return collected > passed; }
+};
+
 // One issued action, so a route through a level can be replayed.
 struct Act {
   int a, x, y;
@@ -383,6 +401,9 @@ struct Agent {
   int blocked_marks;
   int reacquire;  // countdown of probe moves used to find the avatar again
 
+  std::map<int, ColorRule> rules;   // colour stepped onto -> what happened
+  int rule_target;                  // colour of the square we are stepping onto
+
   NoveltyIndex novelty;
   int repeats;    // consecutive choices made from an already-seen state
   int escalation; // 0 walk, 1 interact everywhere, 2 click, 3 restart the level
@@ -406,7 +427,8 @@ struct Agent {
         trigger_kind(TRIG_NONE), trigger_action(-1), trigger_under(-1),
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
-        repeats(0), escalation(0), last_state(0), replaying(false), restarts(0) {
+        rule_target(-1), repeats(0), escalation(0), last_state(0),
+        replaying(false), restarts(0) {
     known.fill(UNKNOWN);
     visited.fill(0);
     probed5.fill(0);
@@ -499,6 +521,8 @@ struct Agent {
         if (!in_bounds(nx, ny)) continue;
         int k = ny * W + nx;
         if (vis[k] || known[k] == BLOCKED) continue;
+        std::map<int, ColorRule>::const_iterator r = rules.find(cur.c[k]);
+        if (r != rules.end() && r->second.is_wall()) continue;
         vis[k] = 1;
         par[k] = cell;
         pact[k] = moveActions[m];
@@ -511,6 +535,29 @@ struct Agent {
     std::reverse(seq.begin(), seq.end());
     if (seq.size() > 30) seq.resize(30);
     return seq;
+  }
+
+  // Squares whose colour has ended a level before. Once level 1 has taught us
+  // this, the rest of the game is a shortest-path problem.
+  std::vector<int> goal_targets() {
+    std::vector<int> t;
+    for (std::map<int, ColorRule>::iterator it = rules.begin(); it != rules.end(); ++it) {
+      if (!it->second.is_goal()) continue;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == it->first) t.push_back(i);
+    }
+    return t;
+  }
+
+  // Things that vanished when walked into - collectables, most likely.
+  std::vector<int> pickup_targets() {
+    std::vector<int> t;
+    for (std::map<int, ColorRule>::iterator it = rules.begin(); it != rules.end(); ++it) {
+      if (!it->second.is_pickup() || it->second.is_goal()) continue;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == it->first && !touched[i]) t.push_back(i);
+    }
+    return t;
   }
 
   // Lattice squares we have not stood on yet, nearest first via the BFS above.
@@ -619,6 +666,12 @@ struct Agent {
       }
 
       if (m.found) {
+        if (rule_target >= 0) {
+          ColorRule& r = rules[rule_target];
+          if (levels_completed > levels) ++r.completed;
+          else if (cur.c[expect_y * W + expect_x] != rule_target) ++r.collected;
+          else ++r.passed;
+        }
         action_moves[last_action][m.disp] += 1;
         ++av_support;
         if (av_support >= 2) avatar_known = true;
@@ -627,6 +680,7 @@ struct Agent {
         visited[ay * W + ax] = 1;
         if (reacquire > 0) reacquire = 0;
       } else if (expect_valid && ax >= 0) {
+        if (rule_target >= 0) ++rules[rule_target].blocked;
         // We asked it to move and it stayed put: that square is not walkable,
         // and every step queued behind it was computed on a stale map.
         if (in_bounds(expect_x, expect_y)) {
@@ -642,9 +696,15 @@ struct Agent {
     expect_valid = false;
 
     if (levels_completed > levels) {
+      // Finishing a level repaints the whole board, so the avatar's move is not
+      // detectable on this frame and the rule above never fires. Record it here
+      // instead: the square we were stepping onto is what ended the level, and
+      // that is the single most valuable thing to know for levels 2..N.
+      if (rule_target >= 0) ++rules[rule_target].completed;
       levels = levels_completed;
       trigger_action = last_action;
       trigger_valid = true;
+      rule_target = -1;
       if (last_action == A6 && have_prev) {
         // Describe the thing we clicked, in the frame as it was before the
         // click, so the same kind of thing can be found in the next level.
@@ -692,6 +752,7 @@ struct Agent {
       if (escalation >= 2) clicked.clear();
     }
 
+    rule_target = -1;
     if (ax >= 0 && ay >= 0 && have_prev) last_under = prev.at(ax, ay);
     stagnant = changed ? 0 : stagnant + 1;
     have_prev = true;
@@ -717,7 +778,8 @@ struct Agent {
     if (cnt > 0 && !v.zero() && ax >= 0) {
       expect_x = ax + v.dx;
       expect_y = ay + v.dy;
-      expect_valid = true;
+      expect_valid = in_bounds(expect_x, expect_y);
+      rule_target = expect_valid ? cur.c[expect_y * W + expect_x] : -1;
     }
     return a;
   }
@@ -771,6 +833,19 @@ struct Agent {
     if (escalation >= 3) {
       restart_from(restart_target());
       return emit(A_RESET, 0, 0);
+    }
+
+    // 4. We know what ends a level here: walk to it. This is the whole point
+    //    of spending level 1 on exploration.
+    if (avatar_known && ax >= 0) {
+      std::vector<int> p = plan_to(goal_targets());
+      if (p.empty()) p = plan_to(pickup_targets());
+      if (!p.empty()) {
+        plan = p;
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
     }
 
     // 4a. The previous level ended on a click: find the thing that looks most
@@ -928,6 +1003,15 @@ ARC3_API void arc3_stats(int h, int* out) {
   out[13] = a->escalation;
   out[14] = int(a->novelty.seen.size());
   out[15] = a->restarts;
+  int goals = 0, walls = 0;
+  for (std::map<int, ColorRule>::const_iterator it = a->rules.begin();
+       it != a->rules.end(); ++it) {
+    if (it->second.is_goal()) ++goals;
+    if (it->second.is_wall()) ++walls;
+  }
+  out[16] = int(a->rules.size());
+  out[17] = goals;
+  out[18] = walls;
 }
 """
 
@@ -1025,18 +1109,27 @@ _STATE_CODE = {
 }
 
 
+# When the notebook started. On Kaggle every action is an HTTP round trip to the
+# gateway, and the whole run has to finish inside 12 hours across every hidden
+# game, so the agent has to budget wall-clock as carefully as it budgets actions.
+_PROCESS_START = time.monotonic()
+_GLOBAL_BUDGET_S = 10.5 * 3600      # margin under the 12 h limit
+_PER_GAME_S = 300.0                 # ~100 games would then fit in ~8.3 h
+
+
 class MyAgent(Agent):
     """Explore deliberately, then repeat what worked."""
 
-    # The framework stops us here; the harness overrides it with the real
-    # per-game budget (5x the human baseline, summed over levels).
-    MAX_ACTIONS = 100_000
+    # A ceiling, not a target. The harness overrides it with the real per-game
+    # budget when measuring locally.
+    MAX_ACTIONS = 6_000
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._h = -1
         self._py = None  # pure-Python fallback policy
         self._started = False
+        self._t0 = time.monotonic()
 
     # -- lifecycle ---------------------------------------------------------
     def _start(self, latest_frame: FrameData) -> None:
@@ -1052,7 +1145,14 @@ class MyAgent(Agent):
         self._started = True
 
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
-        return latest_frame.state is GameState.WIN
+        if latest_frame.state is GameState.WIN:
+            return True
+        now = time.monotonic()
+        # Running out of wall-clock loses every game that has not been played
+        # yet, which costs far more than giving up on this one.
+        if now - self._t0 > _PER_GAME_S:
+            return True
+        return now - _PROCESS_START > _GLOBAL_BUDGET_S
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
         if latest_frame.state is GameState.NOT_PLAYED:
@@ -1098,12 +1198,14 @@ class MyAgent(Agent):
     # Filled in on cleanup so an evaluation run can report what the core
     # actually worked out about each game, not just the score.
     STAT_NAMES = ("avatar_known", "avatar_color", "ax", "ay", "steps", "levels",
-                  "trigger", "blocked", "av_w", "av_h", "plan", "stagnant", "touched")
+                  "trigger", "blocked", "av_w", "av_h", "plan", "stagnant",
+                  "touched", "escalation", "states", "restarts",
+                  "rules", "goals", "walls")
 
     def cleanup(self, *args: Any, **kwargs: Any) -> None:
         core = _core()
         if core is not None and self._h >= 0:
-            buf = (ctypes.c_int * 16)()
+            buf = (ctypes.c_int * 32)()
             core.arc3_stats(self._h, buf)
             self.final_stats = dict(zip(self.STAT_NAMES, list(buf)))
             core.arc3_free(self._h)

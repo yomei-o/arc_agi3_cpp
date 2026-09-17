@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -125,18 +126,27 @@ _STATE_CODE = {
 }
 
 
+# When the notebook started. On Kaggle every action is an HTTP round trip to the
+# gateway, and the whole run has to finish inside 12 hours across every hidden
+# game, so the agent has to budget wall-clock as carefully as it budgets actions.
+_PROCESS_START = time.monotonic()
+_GLOBAL_BUDGET_S = 10.5 * 3600      # margin under the 12 h limit
+_PER_GAME_S = 300.0                 # ~100 games would then fit in ~8.3 h
+
+
 class MyAgent(Agent):
     """Explore deliberately, then repeat what worked."""
 
-    # The framework stops us here; the harness overrides it with the real
-    # per-game budget (5x the human baseline, summed over levels).
-    MAX_ACTIONS = 100_000
+    # A ceiling, not a target. The harness overrides it with the real per-game
+    # budget when measuring locally.
+    MAX_ACTIONS = 6_000
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._h = -1
         self._py = None  # pure-Python fallback policy
         self._started = False
+        self._t0 = time.monotonic()
 
     # -- lifecycle ---------------------------------------------------------
     def _start(self, latest_frame: FrameData) -> None:
@@ -152,7 +162,14 @@ class MyAgent(Agent):
         self._started = True
 
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
-        return latest_frame.state is GameState.WIN
+        if latest_frame.state is GameState.WIN:
+            return True
+        now = time.monotonic()
+        # Running out of wall-clock loses every game that has not been played
+        # yet, which costs far more than giving up on this one.
+        if now - self._t0 > _PER_GAME_S:
+            return True
+        return now - _PROCESS_START > _GLOBAL_BUDGET_S
 
     def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
         if latest_frame.state is GameState.NOT_PLAYED:
@@ -198,12 +215,14 @@ class MyAgent(Agent):
     # Filled in on cleanup so an evaluation run can report what the core
     # actually worked out about each game, not just the score.
     STAT_NAMES = ("avatar_known", "avatar_color", "ax", "ay", "steps", "levels",
-                  "trigger", "blocked", "av_w", "av_h", "plan", "stagnant", "touched")
+                  "trigger", "blocked", "av_w", "av_h", "plan", "stagnant",
+                  "touched", "escalation", "states", "restarts",
+                  "rules", "goals", "walls")
 
     def cleanup(self, *args: Any, **kwargs: Any) -> None:
         core = _core()
         if core is not None and self._h >= 0:
-            buf = (ctypes.c_int * 16)()
+            buf = (ctypes.c_int * 32)()
             core.arc3_stats(self._h, buf)
             self.final_stats = dict(zip(self.STAT_NAMES, list(buf)))
             core.arc3_free(self._h)
