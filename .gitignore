@@ -1,0 +1,10 @@
+*.dll
+*.so
+*.o
+__pycache__/
+.venv/
+environment_files/
+recordings/
+*.json.bak
+.env
+.kaggle/

@@ -1,0 +1,615 @@
+// arc3_core.cpp - ARC-AGI-3 agent core. Zero dependencies, C++17, CPU only.
+//
+// The Python side owns only the HTTP/env loop: it hands us each 64x64 frame and
+// asks for the next action. Everything that constitutes thinking - object
+// extraction, working out which sprite the keys move, learning which cells
+// block, planning a route, replaying the move that finished the last level -
+// happens here.
+//
+// Why this lives in C++: the competition scores each completed level as
+// (human_actions / agent_actions)^2, so a real action is expensive while
+// deliberation is free. We want to search a lot and act rarely, which is
+// exactly the trade C++ buys us.
+//
+// What the frames actually look like (measured on the public games): a 64x64
+// rendered view in which the logical board is drawn at a scale of several
+// pixels per cell, surrounded by HUD furniture - side borders, an inventory
+// panel, a remaining-actions bar - that animates on its own every step. Two
+// consequences drive the design below:
+//   * "the frame did not change" is useless as a collision signal, because the
+//     HUD always changes. We compare the avatar's predicted position with where
+//     it actually ended up instead.
+//   * the avatar's colour is reused by the HUD, so it cannot be re-located by
+//     matching colour and shape. We track it by integrating the translations we
+//     actually observe, and re-acquire it from motion when we lose it.
+//
+// Build (shared lib):
+//   g++ -O2 -std=c++17 -shared -fPIC arc3_core.cpp -o arc3_core.so
+//   g++ -O2 -std=c++17 -shared     arc3_core.cpp -o arc3_core.dll   (w64devkit)
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <queue>
+#include <random>
+#include <set>
+#include <vector>
+
+#if defined(_WIN32)
+#define ARC3_API extern "C" __declspec(dllexport)
+#else
+#define ARC3_API extern "C" __attribute__((visibility("default")))
+#endif
+
+namespace {
+
+constexpr int W = 64, H = 64;
+constexpr int NCELL = W * H;
+
+// Action encoding shared with the Python side (matches GameAction values).
+enum : int { A_RESET = 0, A1 = 1, A2 = 2, A3 = 3, A4 = 4, A5 = 5, A6 = 6, A7 = 7 };
+
+enum : uint8_t { UNKNOWN = 0, FREE = 1, BLOCKED = 2 };
+
+struct Vec {
+  int dx, dy;
+  Vec() : dx(0), dy(0) {}
+  Vec(int x, int y) : dx(x), dy(y) {}
+  bool operator<(const Vec& o) const { return dx != o.dx ? dx < o.dx : dy < o.dy; }
+  bool operator==(const Vec& o) const { return dx == o.dx && dy == o.dy; }
+  bool zero() const { return dx == 0 && dy == 0; }
+};
+
+struct Grid {
+  std::array<int8_t, NCELL> c;
+  Grid() { c.fill(0); }
+  int8_t at(int x, int y) const { return c[y * W + x]; }
+  bool operator==(const Grid& o) const { return c == o.c; }
+};
+
+struct Box {
+  int minx, miny, maxx, maxy, area;
+  Box() : minx(0), miny(0), maxx(0), maxy(0), area(0) {}
+  int w() const { return maxx - minx + 1; }
+  int h() const { return maxy - miny + 1; }
+  int cx() const { return (minx + maxx) / 2; }
+  int cy() const { return (miny + maxy) / 2; }
+};
+
+// Colours covering a large share of the board are scenery, not objects.
+std::set<int> background_colors(const Grid& g) {
+  std::array<int, 32> hist;
+  hist.fill(0);
+  for (int i = 0; i < NCELL; ++i) {
+    int v = g.c[i];
+    if (v >= 0 && v < 32) ++hist[v];
+  }
+  std::set<int> bg;
+  for (int i = 0; i < 32; ++i)
+    if (hist[i] > NCELL / 8) bg.insert(i);
+  return bg;
+}
+
+// Flood fill the same-colour region containing `idx`.
+Box component_at(const Grid& g, int idx, std::vector<int>* cells) {
+  Box b;
+  int col = g.c[idx];
+  std::vector<uint8_t> seen(NCELL, 0);
+  std::vector<int> stack;
+  stack.push_back(idx);
+  seen[idx] = 1;
+  b.minx = b.maxx = idx % W;
+  b.miny = b.maxy = idx / W;
+  while (!stack.empty()) {
+    int j = stack.back();
+    stack.pop_back();
+    int x = j % W, y = j / W;
+    ++b.area;
+    if (cells) cells->push_back(j);
+    b.minx = std::min(b.minx, x);
+    b.maxx = std::max(b.maxx, x);
+    b.miny = std::min(b.miny, y);
+    b.maxy = std::max(b.maxy, y);
+    const int nb[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (int d = 0; d < 4; ++d) {
+      int nx = x + nb[d][0], ny = y + nb[d][1];
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      int k = ny * W + nx;
+      if (seen[k] || g.c[k] != col) continue;
+      seen[k] = 1;
+      stack.push_back(k);
+    }
+  }
+  return b;
+}
+
+std::vector<Box> components(const Grid& g, const std::set<int>& bg, std::vector<int>* colors) {
+  std::vector<Box> out;
+  std::array<uint8_t, NCELL> seen;
+  seen.fill(0);
+  std::vector<int> stack;
+  for (int i = 0; i < NCELL; ++i) {
+    if (seen[i]) continue;
+    int col = g.c[i];
+    if (bg.count(col)) { seen[i] = 1; continue; }
+    Box b;
+    b.minx = b.maxx = i % W;
+    b.miny = b.maxy = i / W;
+    stack.clear();
+    stack.push_back(i);
+    seen[i] = 1;
+    while (!stack.empty()) {
+      int j = stack.back();
+      stack.pop_back();
+      int x = j % W, y = j / W;
+      ++b.area;
+      b.minx = std::min(b.minx, x);
+      b.maxx = std::max(b.maxx, x);
+      b.miny = std::min(b.miny, y);
+      b.maxy = std::max(b.maxy, y);
+      const int nb[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+      for (int d = 0; d < 4; ++d) {
+        int nx = x + nb[d][0], ny = y + nb[d][1];
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        int k = ny * W + nx;
+        if (seen[k] || g.c[k] != col) continue;
+        seen[k] = 1;
+        stack.push_back(k);
+      }
+    }
+    out.push_back(b);
+    if (colors) colors->push_back(col);
+  }
+  return out;
+}
+
+// A translation of one colour between two frames.
+struct Motion {
+  int color;
+  Vec disp;
+  int anchor;  // a cell of the moved shape in the NEW frame
+  bool found;
+  Motion() : color(-1), anchor(-1), found(false) {}
+};
+
+// Explain part of a frame transition as "a shape of one colour translated".
+// `only_color` < 0 means "consider every colour"; the largest moved shape wins.
+Motion detect_translation(const Grid& a, const Grid& b, const std::set<int>& bg,
+                          int only_color) {
+  Motion best;
+  int best_area = 0;
+
+  std::map<int, std::vector<int> > vanished, appeared;
+  int ndiff = 0;
+  for (int i = 0; i < NCELL; ++i) {
+    if (a.c[i] == b.c[i]) continue;
+    if (++ndiff > 1200) return best;
+    int oa = a.c[i], ob = b.c[i];
+    if (!bg.count(oa) && (only_color < 0 || oa == only_color)) vanished[oa].push_back(i);
+    if (!bg.count(ob) && (only_color < 0 || ob == only_color)) appeared[ob].push_back(i);
+  }
+
+  for (std::map<int, std::vector<int> >::iterator kv = vanished.begin();
+       kv != vanished.end(); ++kv) {
+    int col = kv->first;
+    std::map<int, std::vector<int> >::iterator ai = appeared.find(col);
+    if (ai == appeared.end()) continue;
+    const std::vector<int>& from = kv->second;
+    const std::vector<int>& to = ai->second;
+    if (from.size() != to.size() || from.empty() || from.size() > 300) continue;
+    if (int(from.size()) <= best_area) continue;
+
+    int fx = from[0] % W, fy = from[0] / W;
+    for (size_t t = 0; t < to.size(); ++t) {
+      Vec v(to[t] % W - fx, to[t] / W - fy);
+      if (v.zero() || std::abs(v.dx) > 16 || std::abs(v.dy) > 16) continue;
+      // Every cell the colour left must be matched by the same colour, shifted.
+      bool ok = true;
+      for (size_t k = 0; k < from.size() && ok; ++k) {
+        int nx = from[k] % W + v.dx, ny = from[k] / W + v.dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) { ok = false; break; }
+        if (b.c[ny * W + nx] != col) ok = false;
+      }
+      if (ok) {
+        best.color = col;
+        best.disp = v;
+        best.anchor = (fy + v.dy) * W + (fx + v.dx);
+        best.found = true;
+        best_area = int(from.size());
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// The agent.
+// ---------------------------------------------------------------------------
+struct Agent {
+  std::mt19937 rng;
+  std::vector<int> avail;
+  bool has6;
+
+  Grid prev, cur;
+  bool have_prev;
+  int steps;
+  int levels;
+
+  std::vector<int> calib_queue;
+
+  // Avatar model.
+  int av_color;
+  int av_w, av_h;
+  std::map<int, std::map<Vec, int> > action_moves;  // action -> displacement -> count
+  int av_support;
+  bool avatar_known;
+  int ax, ay;  // avatar bounding-box top-left, -1 when lost
+
+  // Where the avatar should have ended up after the action we just issued.
+  bool expect_valid;
+  int expect_x, expect_y;
+
+  std::array<uint8_t, NCELL> known;
+  std::array<uint8_t, NCELL> visited;
+  std::array<uint8_t, NCELL> probed5;
+  std::set<int> clicked;
+
+  std::vector<int> plan;
+  int last_action;
+  int pending_x, pending_y;
+
+  // What immediately preceded the last level completion.
+  int trigger_action;
+  int trigger_under;
+  bool trigger_valid;
+  int last_under;
+
+  int stagnant;
+  int blocked_marks;
+  int reacquire;  // countdown of probe moves used to find the avatar again
+
+  Agent()
+      : rng(12345), has6(false), have_prev(false), steps(0), levels(0),
+        av_color(-1), av_w(0), av_h(0), av_support(0), avatar_known(false),
+        ax(-1), ay(-1), expect_valid(false), expect_x(-1), expect_y(-1),
+        last_action(-1), pending_x(0), pending_y(0),
+        trigger_action(-1), trigger_under(-1), trigger_valid(false),
+        last_under(-1), stagnant(0), blocked_marks(0), reacquire(0) {
+    known.fill(UNKNOWN);
+    visited.fill(0);
+    probed5.fill(0);
+  }
+
+  void init(const int* actions, int n) {
+    avail.clear();
+    for (int i = 0; i < n; ++i) {
+      if (actions[i] == A6) has6 = true;
+      else if (actions[i] >= A1 && actions[i] <= A7) avail.push_back(actions[i]);
+    }
+    if (avail.empty() && !has6) {
+      avail.push_back(A1); avail.push_back(A2); avail.push_back(A3); avail.push_back(A4);
+    }
+    queue_calibration();
+  }
+
+  void queue_calibration() {
+    calib_queue.clear();
+    for (int pass = 0; pass < 2; ++pass)
+      for (size_t i = 0; i < avail.size(); ++i)
+        if (avail[i] != A5 && avail[i] != A7) calib_queue.push_back(avail[i]);
+  }
+
+  bool in_bounds(int x, int y) const { return x >= 0 && y >= 0 && x < W && y < H; }
+
+  Vec best_move(int action, int* count) const {
+    std::map<int, std::map<Vec, int> >::const_iterator it = action_moves.find(action);
+    if (it == action_moves.end()) { if (count) *count = 0; return Vec(); }
+    Vec best; int bc = 0;
+    for (std::map<Vec, int>::const_iterator k = it->second.begin(); k != it->second.end(); ++k)
+      if (k->second > bc) { bc = k->second; best = k->first; }
+    if (count) *count = bc;
+    return best;
+  }
+
+  bool is_move_action(int a) const {
+    int c = 0;
+    Vec v = best_move(a, &c);
+    return c > 0 && !v.zero();
+  }
+
+  // Adopt the moved shape as the avatar and re-measure its bounding box.
+  void adopt(const Motion& m) {
+    av_color = m.color;
+    Box b = component_at(cur, m.anchor, 0);
+    ax = b.minx;
+    ay = b.miny;
+    av_w = b.w();
+    av_h = b.h();
+  }
+
+  // Squares the avatar can stand on, in its own movement lattice.
+  std::vector<int> plan_to(const std::vector<int>& targets) {
+    std::vector<int> empty;
+    if (!avatar_known || ax < 0 || targets.empty()) return empty;
+    std::set<int> tgt(targets.begin(), targets.end());
+
+    std::vector<int> moveActions;
+    std::vector<Vec> moveVecs;
+    for (size_t i = 0; i < avail.size(); ++i) {
+      int a = avail[i];
+      if (a == A5 || a == A7) continue;
+      int cnt = 0;
+      Vec v = best_move(a, &cnt);
+      if (cnt > 0 && !v.zero()) { moveActions.push_back(a); moveVecs.push_back(v); }
+    }
+    if (moveActions.empty()) return empty;
+
+    std::vector<int> par(NCELL, -1), pact(NCELL, -1);
+    std::vector<uint8_t> vis(NCELL, 0);
+    std::queue<int> q;
+    int start = ay * W + ax;
+    q.push(start);
+    vis[start] = 1;
+    int found = -1;
+    while (!q.empty()) {
+      int cell = q.front();
+      q.pop();
+      if (cell != start && tgt.count(cell)) { found = cell; break; }
+      int x = cell % W, y = cell / W;
+      for (size_t m = 0; m < moveActions.size(); ++m) {
+        int nx = x + moveVecs[m].dx, ny = y + moveVecs[m].dy;
+        if (!in_bounds(nx, ny)) continue;
+        int k = ny * W + nx;
+        if (vis[k] || known[k] == BLOCKED) continue;
+        vis[k] = 1;
+        par[k] = cell;
+        pact[k] = moveActions[m];
+        q.push(k);
+      }
+    }
+    if (found < 0) return empty;
+    std::vector<int> seq;
+    for (int c = found; c != start && par[c] >= 0; c = par[c]) seq.push_back(pact[c]);
+    std::reverse(seq.begin(), seq.end());
+    if (seq.size() > 30) seq.resize(30);
+    return seq;
+  }
+
+  // Lattice squares we have not stood on yet, nearest first via the BFS above.
+  std::vector<int> frontier_targets() {
+    std::vector<int> t;
+    for (int i = 0; i < NCELL; ++i)
+      if (!visited[i] && known[i] != BLOCKED) t.push_back(i);
+    return t;
+  }
+
+  void on_new_level() {
+    // Geometry changed; keep the action model and the winning trigger, drop the
+    // map and re-acquire the avatar from its next movement.
+    known.fill(UNKNOWN);
+    visited.fill(0);
+    probed5.fill(0);
+    clicked.clear();
+    plan.clear();
+    ax = ay = -1;
+    expect_valid = false;
+    reacquire = int(avail.size()) * 2;
+  }
+
+  void observe(const int8_t* frame, int levels_completed, int /*state*/) {
+    Grid g;
+    std::memcpy(g.c.data(), frame, NCELL);
+    prev = cur;
+    cur = g;
+    bool changed = have_prev ? !(prev == cur) : true;
+    std::set<int> bg = background_colors(cur);
+
+    if (have_prev && last_action >= 0 && last_action != A_RESET) {
+      Motion m = detect_translation(prev, cur, bg, av_color);
+      if (!m.found && av_color >= 0) {
+        // The avatar did not move; maybe something else did, and maybe we are
+        // tracking the wrong colour. Only re-open the question when lost.
+        if (ax < 0) m = detect_translation(prev, cur, bg, -1);
+      }
+
+      if (m.found) {
+        action_moves[last_action][m.disp] += 1;
+        ++av_support;
+        if (av_support >= 2) avatar_known = true;
+        adopt(m);
+        known[ay * W + ax] = FREE;
+        visited[ay * W + ax] = 1;
+        if (reacquire > 0) reacquire = 0;
+      } else if (expect_valid && ax >= 0) {
+        // We asked it to move and it stayed put: that square is not walkable.
+        if (in_bounds(expect_x, expect_y)) {
+          known[expect_y * W + expect_x] = BLOCKED;
+          ++blocked_marks;
+        }
+        visited[ay * W + ax] = 1;
+      }
+    }
+    expect_valid = false;
+
+    if (levels_completed > levels) {
+      levels = levels_completed;
+      trigger_action = last_action;
+      trigger_under = last_under;
+      trigger_valid = true;
+      on_new_level();
+    }
+
+    if (ax >= 0 && ay >= 0 && have_prev) last_under = prev.at(ax, ay);
+    stagnant = changed ? 0 : stagnant + 1;
+    have_prev = true;
+    ++steps;
+  }
+
+  int emit(int a) {
+    last_action = a;
+    // Remember where a move action should take us, so the next frame tells us
+    // whether that square was walkable.
+    int cnt = 0;
+    Vec v = best_move(a, &cnt);
+    if (cnt > 0 && !v.zero() && ax >= 0) {
+      expect_x = ax + v.dx;
+      expect_y = ay + v.dy;
+      expect_valid = true;
+    }
+    return a;
+  }
+
+  int choose() {
+    std::set<int> bg = background_colors(cur);
+
+    // 1. Calibration: find out what each action does.
+    if (!calib_queue.empty()) {
+      int a = calib_queue.front();
+      calib_queue.erase(calib_queue.begin());
+      return emit(a);
+    }
+
+    // 2. Lost the avatar (new level): probe until we see something move.
+    if (reacquire > 0 && ax < 0) {
+      --reacquire;
+      int a = avail.empty() ? A1 : avail[reacquire % avail.size()];
+      return emit(a);
+    }
+
+    // 3. Follow the current plan.
+    if (!plan.empty()) {
+      int a = plan.front();
+      plan.erase(plan.begin());
+      return emit(a);
+    }
+
+    // 4. Replay the trigger that finished the previous level: walk to the
+    //    nearest square of that colour and repeat the winning action.
+    if (trigger_valid && avatar_known && trigger_under >= 0) {
+      std::vector<int> t;
+      for (int i = 0; i < NCELL; ++i)
+        if (cur.c[i] == trigger_under && !visited[i]) t.push_back(i);
+      if (!t.empty()) {
+        std::vector<int> p = plan_to(t);
+        if (!p.empty()) {
+          if (trigger_action >= 0 && !is_move_action(trigger_action))
+            p.push_back(trigger_action);
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+    }
+
+    // 5. Directed exploration: shortest path to a square we have not stood on.
+    if (avatar_known && ax >= 0) {
+      std::vector<int> p = plan_to(frontier_targets());
+      if (!p.empty()) {
+        plan = p;
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      // Nowhere left to walk: try the context action where we stand.
+      if (std::find(avail.begin(), avail.end(), A5) != avail.end() &&
+          !probed5[ay * W + ax]) {
+        probed5[ay * W + ax] = 1;
+        return emit(A5);
+      }
+      // Fully explored and nothing to interact with: forget the map so the
+      // frontier refills, in case the world changed under us.
+      visited.fill(0);
+      known.fill(UNKNOWN);
+    }
+
+    // 6. Click-style game: click object centroids once each, not random pixels.
+    if (has6) {
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      std::vector<std::pair<int, int> > order;  // (-area, index)
+      for (size_t i = 0; i < comps.size(); ++i)
+        order.push_back(std::make_pair(-comps[i].area, int(i)));
+      std::sort(order.begin(), order.end());
+      for (size_t i = 0; i < order.size(); ++i) {
+        const Box& b = comps[order[i].second];
+        int key = b.cy() * W + b.cx();
+        if (clicked.count(key)) continue;
+        clicked.insert(key);
+        pending_x = b.cx();
+        pending_y = b.cy();
+        return emit(A6);
+      }
+      for (int y = 2; y < H; y += 4)
+        for (int x = 2; x < W; x += 4) {
+          int key = y * W + x;
+          if (clicked.count(key)) continue;
+          clicked.insert(key);
+          pending_x = x;
+          pending_y = y;
+          return emit(A6);
+        }
+      clicked.clear();
+    }
+
+    // 7. Fallback.
+    int a = A1;
+    if (!avail.empty()) {
+      std::uniform_int_distribution<int> d(0, int(avail.size()) - 1);
+      a = avail[d(rng)];
+    }
+    return emit(a);
+  }
+};
+
+std::vector<Agent*> g_agents;
+
+}  // namespace
+
+ARC3_API int arc3_new(const int* actions, int n) {
+  Agent* a = new Agent();
+  a->init(actions, n);
+  g_agents.push_back(a);
+  return int(g_agents.size()) - 1;
+}
+
+ARC3_API void arc3_free(int h) {
+  if (h >= 0 && h < int(g_agents.size()) && g_agents[h]) {
+    delete g_agents[h];
+    g_agents[h] = 0;
+  }
+}
+
+ARC3_API void arc3_observe(int h, const int8_t* frame, int levels_completed, int state) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->observe(frame, levels_completed, state);
+}
+
+ARC3_API int arc3_choose(int h, int* out_x, int* out_y) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return A1;
+  Agent* a = g_agents[h];
+  int act = a->choose();
+  if (out_x) *out_x = a->pending_x;
+  if (out_y) *out_y = a->pending_y;
+  return act;
+}
+
+ARC3_API void arc3_stats(int h, int* out) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  Agent* a = g_agents[h];
+  out[0] = a->avatar_known ? 1 : 0;
+  out[1] = a->av_color;
+  out[2] = a->ax;
+  out[3] = a->ay;
+  out[4] = a->steps;
+  out[5] = a->levels;
+  out[6] = a->trigger_valid ? 1 : 0;
+  out[7] = a->blocked_marks;
+  out[8] = a->av_w;
+  out[9] = a->av_h;
+  out[10] = int(a->plan.size());
+  out[11] = a->stagnant;
+}
