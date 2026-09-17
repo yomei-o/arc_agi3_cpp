@@ -85,8 +85,8 @@ def analyse(game: str, sol: dict) -> list[dict]:
     obs = env.step(GameAction.RESET)
     prev_frame = frame_of(obs)
     prev_levels = 0
-    avatar = None  # (colour, y, x)
-    touched_colors: Counter[int] = Counter()
+    avatar = None            # (colour, y, x) of the sprite the keys move
+    disp: dict[str, tuple[int, int]] = {}   # action -> how far it moves that sprite
 
     for i, (a, x, y) in enumerate(traj):
         act = BY_VALUE[a]
@@ -98,6 +98,8 @@ def analyse(game: str, sol: dict) -> list[dict]:
 
         mv = moving_shape(prev_frame, frame)
         if mv is not None:
+            if avatar is not None and mv[0] == avatar[0]:
+                disp[act.name] = (mv[1] - avatar[1], mv[2] - avatar[2])
             avatar = mv
 
         if levels > prev_levels:
@@ -113,11 +115,18 @@ def analyse(game: str, sol: dict) -> list[dict]:
             if avatar is not None:
                 acol, ay, ax = avatar
                 rec["avatar_colour"] = acol
-                under = int(prev_frame[min(ay, 63), min(ax, 63)])
-                rec["standing_on"] = under
                 counts = Counter(prev_frame.reshape(-1).tolist())
-                rec["standing_on_share"] = round(counts[under] / prev_frame.size, 4)
-                rec["standing_on_is_rare"] = counts[under] < prev_frame.size * 0.02
+                # The square the sprite was ABOUT to enter. Reading the one it
+                # already occupies is trivially its own colour and says nothing.
+                d = disp.get(act.name)
+                if d is not None:
+                    ty, tx = ay + d[0], ax + d[1]
+                    if 0 <= ty < 64 and 0 <= tx < 64:
+                        into = int(prev_frame[ty, tx])
+                        rec["stepping_onto"] = into
+                        rec["stepping_onto_share"] = round(counts[into] / prev_frame.size, 4)
+                        rec["stepping_onto_is_rare"] = counts[into] < prev_frame.size * 0.02
+                        rec["matches_own_colour"] = (into == acol)
             changed = int((prev_frame != frame).sum())
             rec["cells_changed"] = changed
             rec["whole_board_repaint"] = changed > prev_frame.size * 0.3
@@ -154,9 +163,11 @@ def main() -> None:
     print("action that completed the level:")
     for k, v in Counter(r["action"] for r in recs).most_common():
         print(f"   {k:10} {v}")
-    on_rare = [r for r in recs if r.get("standing_on_is_rare")]
-    print(f"\ncompleted while the avatar stood on a rare colour: "
-          f"{len(on_rare)}/{sum(1 for r in recs if 'standing_on' in r)}")
+    have = [r for r in recs if "stepping_onto" in r]
+    rare = sum(1 for r in have if r.get("stepping_onto_is_rare"))
+    same = sum(1 for r in have if r.get("matches_own_colour"))
+    print(f"\nmoves into a RARE colour:  {rare}/{len(have)}")
+    print(f"moves into ITS OWN colour: {same}/{len(have)}")
     repaint = sum(1 for r in recs if r.get("whole_board_repaint"))
     print(f"completions that repainted most of the board (level transition): {repaint}/{len(recs)}")
     by_game = defaultdict(list)

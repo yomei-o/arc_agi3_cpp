@@ -103,6 +103,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
 
@@ -166,6 +167,7 @@ class MyAgent(Agent):
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "8")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
+            core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py

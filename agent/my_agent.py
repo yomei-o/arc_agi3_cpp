@@ -413,6 +413,33 @@ struct ArcEntry {
   ArcEntry() : visits(0) {}
 };
 
+// Pixels per logical cell. The 64x64 frame is a rendered view - LS20 draws its
+// board at 5 px per cell, TU93 at 3, WA30 at 4 - so a sprite is never smaller
+// than about one cell. Without this the "smallest moved shape" rule picks up
+// single-pixel specks: on TU93 it adopted a 1x1 dot of colour 4 as the avatar
+// while the actual player, a 3x3 block of colour 9, went untracked.
+int detect_scale(const Grid& g) {
+  std::array<int, 9> hits;
+  hits.fill(0);
+  int edges = 0;
+  for (int y = 0; y < H; ++y)
+    for (int x = 1; x < W; ++x)
+      if (g.c[y * W + x] != g.c[y * W + x - 1]) {
+        ++edges;
+        for (int s = 2; s <= 8; ++s) if (x % s == 0) ++hits[s];
+      }
+  for (int x = 0; x < W; ++x)
+    for (int y = 1; y < H; ++y)
+      if (g.c[y * W + x] != g.c[(y - 1) * W + x]) {
+        ++edges;
+        for (int s = 2; s <= 8; ++s) if (y % s == 0) ++hits[s];
+      }
+  if (edges < 16) return 1;
+  for (int s = 8; s >= 2; --s)
+    if (hits[s] * 10 >= edges * 9) return s;   // nearly every edge lands on the grid
+  return 1;
+}
+
 // A translation of one colour between two frames.
 struct Motion {
   int color;
@@ -433,9 +460,10 @@ constexpr int MAX_AVATAR_SIDE = 16;
 // `only_color` < 0 means "consider every colour"; the SMALLEST plausible moved
 // shape wins, because that is what an avatar looks like.
 Motion detect_translation(const Grid& a, const Grid& b, const std::set<int>& bg,
-                          int only_color) {
+                          int only_color, int scale) {
   Motion best;
   int best_area = 1 << 30;
+  const int min_area = std::max(4, scale * scale / 2);
 
   std::map<int, std::vector<int> > vanished, appeared;
   int ndiff = 0;
@@ -455,6 +483,7 @@ Motion detect_translation(const Grid& a, const Grid& b, const std::set<int>& bg,
     const std::vector<int>& from = kv->second;
     const std::vector<int>& to = ai->second;
     if (from.size() != to.size() || from.empty()) continue;
+    if (int(from.size()) < min_area) continue;      // a speck, not a sprite
     if (int(from.size()) > MAX_AVATAR_CELLS * 2) continue;
     if (int(from.size()) >= best_area) continue;
 
@@ -563,6 +592,8 @@ struct Agent {
   int alpha_objects;   // how many object centroids the search may click
   int alpha_grid;      // plus this many coarse-grid points, for background hits
   int depth_cap;       // how far from the level start the search may wander
+  int budget;          // actions this game allows, for pacing the ensemble
+  int phase_mode;      // which policy the ensemble is currently running
   int rollout_len;
   int since_restart;
 
@@ -639,6 +670,7 @@ struct Agent {
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
         idd_active(false), idd_try_solution(false), ge_here(0), ge_ready(false),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
+        budget(4000), phase_mode(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -926,11 +958,24 @@ struct Agent {
     bool positional = (last_action >= A1 && last_action <= A5) || last_action == A7;
 
     if (have_prev && positional && last_action != A_RESET) {
-      Motion m = detect_translation(prev, cur, bg, av_color);
+      int scale = detect_scale(cur);
+      Motion m = detect_translation(prev, cur, bg, av_color, scale);
       if (!m.found && av_color >= 0) {
-        // The avatar did not move; maybe something else did, and maybe we are
-        // tracking the wrong colour. Only re-open the question when lost.
-        if (ax < 0) m = detect_translation(prev, cur, bg, -1);
+        // Many of these games are modal: a click or a press of the interact key
+        // changes WHICH thing the direction keys move. Pinning the avatar to
+        // one colour for the whole game breaks the moment that happens, so the
+        // rule is simply "the avatar is whatever the direction keys are moving
+        // now" - if the one we were tracking did not move and something else
+        // did, that something else is the avatar.
+        m = detect_translation(prev, cur, bg, -1, scale);
+        if (m.found && m.color != av_color) {
+          // A different sprite answers to the keys: start its map afresh, since
+          // what blocks one thing need not block another.
+          known.fill(UNKNOWN);
+          visited.fill(0);
+          plan.clear();
+          av_w = av_h = 0;
+        }
       }
 
       if (m.found) {
@@ -1306,6 +1351,34 @@ struct Agent {
   int choose() {
     std::set<int> bg = background_colors(cur);
 
+    // Mode 7: spend the budget on several policies in turn.
+    //
+    // They do not fail on the same games - the heuristic gets CN04, LS20, SP80
+    // and LF52, sticky-random gets LP85, SP80 and VC33 - and a level left
+    // unfinished scores zero however many actions went into it, so there is
+    // nothing to protect by staying with one. The games that do fall, fall
+    // early (LS20's level 1 costs 87 actions of about 3,900), so splitting the
+    // budget costs little.
+    if (explore_mode == 7) {
+      int spent = steps;
+      int m = (spent * 3 < budget) ? 0 : (spent * 3 < 2 * budget ? 1 : 6);
+      if (m != phase_mode) {
+        phase_mode = m;
+        plan.clear();
+        replaying = false;
+        replay_queue.clear();
+        clicked.clear();
+        probed5.fill(0);
+        touched.fill(0);
+        if (m == 6) idd_begin();
+      }
+      int saved = explore_mode;
+      explore_mode = m;
+      int a = choose();
+      explore_mode = saved;
+      return a;
+    }
+
     // Dead: RESET is the only legal action. Use it to resume from a state worth
     // revisiting rather than from the start of the level.
     if (last_state == 3) {
@@ -1527,6 +1600,15 @@ struct Agent {
       return emit(a);
     }
 
+    // Whatever we last clicked is still changing the world: press it again.
+    // The compressed offline solutions for the click games are largely runs of
+    // one coordinate - S5I5's level 1 is two points pressed thirteen times
+    // between them - and this has to outrank replaying the previous level's
+    // winning click, which otherwise moves on after a single press and leaves
+    // the agent clicking dead spots (LP85 sat for 27 straight actions without
+    // the frame changing at all).
+    if (has6 && click_live && click_x >= 0) return emit(A6, click_x, click_y);
+
     // 3b. Circling with nothing left to try: restart this level. A mid-game
     //     RESET restarts only the current level and keeps the levels we have
     //     already finished (arcengine base_game.handle_reset), so it is a retry
@@ -1696,6 +1778,11 @@ ARC3_API void arc3_set_alphabet(int h, int objects, int grid) {
   g_agents[h]->alpha_grid = grid;
 }
 
+ARC3_API void arc3_set_budget(int h, int n) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->budget = n > 0 ? n : 4000;
+}
+
 ARC3_API void arc3_set_depth(int h, int cap) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->depth_cap = cap;
@@ -1838,6 +1925,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
 
@@ -1901,6 +1989,7 @@ class MyAgent(Agent):
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "8")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
+            core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
