@@ -1,0 +1,410 @@
+r"""Offline solver: find short winning action sequences for the public games.
+
+Locally the games arrive as Python classes, so `copy.deepcopy(env)` gives a
+perfect simulator and a restored state replays identically (verified in
+bench_sim.py). That turns each public game into a search problem, and the search
+we want is Go-Explore: keep an archive of distinct states, return to a promising
+one, explore from it, and - crucially - whenever a state is reached again by a
+shorter route, keep the shorter one.
+
+That last rule is why this is the right algorithm here rather than a generic
+planner: the competition scores a completed level as (human/agent actions)^2, so
+what we need from the offline phase is not merely a solution but a SHORT one.
+Go-Explore optimises exactly that quantity as a side effect of its archive.
+
+The output - shortest trajectory to each level of each public game, together
+with the frames along it - is the training material for the transferable policy
+that has to play the hidden games without a simulator.
+
+Two environment facts this relies on, both established by reading arcengine:
+  * mid-game RESET restarts only the CURRENT level and keeps levels_completed
+    (base_game.handle_reset). A RESET when action_count == 0 is a full reset.
+  * the frame carries HUD furniture - a remaining-actions bar - that advances
+    every step regardless of what we do. Hashing the raw frame would make every
+    state novel, so the HUD is detected and masked out before hashing.
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import logging
+import os
+import random
+import sys
+import time
+from collections import OrderedDict
+from pathlib import Path
+
+STARTER = Path(os.environ.get("ARC_STARTER", r"C:\prog\arc\starter"))
+sys.path.insert(0, str(STARTER))
+sys.path.insert(0, str(STARTER / "vendor" / "ARC-AGI-3-Agents"))
+
+import numpy as np
+import arc_agi
+from arc_agi import OperationMode
+from arcengine import GameAction, GameState
+
+SIMPLE = [GameAction.ACTION1, GameAction.ACTION2, GameAction.ACTION3,
+          GameAction.ACTION4, GameAction.ACTION5, GameAction.ACTION7]
+BY_VALUE = {a.value: a for a in GameAction}
+
+
+def quiet() -> None:
+    logging.getLogger().setLevel(logging.ERROR)
+    for n in ("arc_agi", "arc_agi.scorecard", "root", "arc_agi.base"):
+        logging.getLogger(n).setLevel(logging.ERROR)
+
+
+# ---------------------------------------------------------------------------
+# Perception helpers
+# ---------------------------------------------------------------------------
+def frame_of(obs) -> np.ndarray | None:
+    if obs is None or not obs.frame:
+        return None
+    return np.asarray(obs.frame[-1], dtype=np.int8)
+
+
+def hud_mask(arc, game_id: str, rollouts: int = 4, length: int = 80) -> np.ndarray:
+    """Clock cells: they advance with the step index whatever we do.
+
+    Run several *different* random rollouts of equal length from a full reset
+    and keep the cells that (a) hold the same value at every step across all of
+    them, and (b) actually change over the course of a rollout. Condition (b)
+    matters more than it looks: without it the mask also swallows every cell
+    that random play merely failed to disturb - a pushable block, a door, a
+    switch - and those are exactly the cells that distinguish one state from
+    another. Masking them makes the whole archive collapse to "where the avatar
+    is", which is how this search first came back with 22 states after 30k
+    steps.
+
+    Static scenery is deliberately left unmasked. It costs nothing in the hash
+    while it stays constant, and the moment the game does change it we want to
+    notice.
+    """
+    seqs = []
+    for r in range(rollouts):
+        env = arc.make(game_id)
+        env.step(GameAction.RESET)
+        rng = random.Random(1000 + r)
+        acts = [a for a in env.action_space if not a.is_complex()]
+        frames = []
+        for _ in range(length):
+            if acts:
+                a = rng.choice(acts)
+                o = env.step(a)
+            else:
+                o = env.step(GameAction.ACTION6,
+                             data={"x": rng.randrange(64), "y": rng.randrange(64)})
+            f = frame_of(o)
+            if f is None:
+                break
+            frames.append(f)
+        seqs.append(frames)
+
+    n = min(len(s) for s in seqs)
+    if n == 0:
+        return np.zeros((64, 64), dtype=bool)
+    same = np.ones((64, 64), dtype=bool)
+    varies = np.zeros((64, 64), dtype=bool)
+    for t in range(n):
+        for r in range(len(seqs)):
+            if r:
+                same &= seqs[r][t] == seqs[0][t]
+            varies |= seqs[r][t] != seqs[r][0]
+    return same & varies
+
+
+def action_candidates(env, frame: np.ndarray, rng: random.Random, max_clicks: int = 24):
+    """Legal actions, with ACTION6 aimed at objects instead of random pixels.
+
+    A 64x64 click space would swamp the search; the interesting targets are the
+    objects, so we offer each connected component's centroid plus a coarse grid
+    as a fallback.
+    """
+    out = []
+    for a in env.action_space:
+        if not a.is_complex():
+            out.append((a.value, 0, 0))
+    if any(a.is_complex() for a in env.action_space) and frame is not None:
+        for (x, y) in object_centroids(frame)[:max_clicks]:
+            out.append((6, x, y))
+    return out
+
+
+def object_centroids(frame: np.ndarray) -> list[tuple[int, int]]:
+    """Centroids of same-colour connected components, largest first.
+
+    Deliberately simple: colours covering more than an eighth of the board are
+    scenery and skipped.
+    """
+    h, w = frame.shape
+    counts = np.bincount(frame.reshape(-1).astype(np.int32) & 0x1F, minlength=32)
+    bg = {int(c) for c in np.nonzero(counts > (h * w) // 8)[0]}
+    seen = np.zeros((h, w), dtype=bool)
+    out = []
+    for y in range(h):
+        for x in range(w):
+            if seen[y, x]:
+                continue
+            col = int(frame[y, x])
+            if col in bg:
+                seen[y, x] = True
+                continue
+            stack = [(y, x)]
+            seen[y, x] = True
+            cells = []
+            while stack:
+                cy, cx = stack.pop()
+                cells.append((cy, cx))
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h and 0 <= nx < w and not seen[ny, nx] and frame[ny, nx] == col:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            ys = [c[0] for c in cells]
+            xs = [c[1] for c in cells]
+            out.append((len(cells), (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2))
+    out.sort(reverse=True)
+    return [(x, y) for _, x, y in out]
+
+
+# ---------------------------------------------------------------------------
+# Go-Explore
+# ---------------------------------------------------------------------------
+class Entry:
+    __slots__ = ("traj", "levels", "visits", "chosen")
+
+    def __init__(self, traj: bytes, levels: int) -> None:
+        self.traj = traj
+        self.levels = levels
+        self.visits = 0
+        self.chosen = 0
+
+
+def pack(traj: list[tuple[int, int, int]]) -> bytes:
+    b = bytearray()
+    for a, x, y in traj:
+        b += bytes((a, x, y))
+    return bytes(b)
+
+
+def unpack(b: bytes) -> list[tuple[int, int, int]]:
+    return [(b[i], b[i + 1], b[i + 2]) for i in range(0, len(b), 3)]
+
+
+class Solver:
+    def __init__(self, game: str, seed: int = 0, snap_cache: int = 300) -> None:
+        quiet()
+        self.game = game
+        self.arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
+        self.rng = random.Random(seed)
+        self.mask = hud_mask(self.arc, game)
+        self.env = self.arc.make(game)
+        self.archive: dict[bytes, Entry] = {}
+        self.snaps: OrderedDict[bytes, object] = OrderedDict()
+        self.snap_cache = snap_cache
+        self.best_by_level: dict[int, list[tuple[int, int, int]]] = {}
+        self.steps = 0        # exploration steps - the search budget
+        self.replayed = 0     # steps spent returning to an archived state
+        self.max_levels = 0
+
+    # -- state key --------------------------------------------------------
+    def key(self, frame: np.ndarray, levels: int) -> bytes:
+        masked = np.where(self.mask, np.int8(0), frame)
+        return bytes((levels,)) + masked.tobytes()
+
+    # -- restore ----------------------------------------------------------
+    def restore(self, traj: bytes):
+        """Return an env sitting at the end of `traj`."""
+        snap = self.snaps.get(traj)
+        if snap is not None:
+            self.snaps.move_to_end(traj)
+            return copy.deepcopy(snap)
+        env = self.arc.make(self.game)
+        env.step(GameAction.RESET)  # action_count == 0 => full reset
+        obs = None
+        for a, x, y in unpack(traj):
+            act = BY_VALUE[a]
+            obs = env.step(act, data={"x": x, "y": y} if act.is_complex() else {})
+            self.replayed += 1
+        return env, obs
+
+    def remember(self, traj: bytes, env) -> None:
+        if self.snap_cache <= 0:
+            return
+        self.snaps[traj] = copy.deepcopy(env)
+        self.snaps.move_to_end(traj)
+        while len(self.snaps) > self.snap_cache:
+            self.snaps.popitem(last=False)
+
+    # -- main loop --------------------------------------------------------
+    def run(self, budget_steps: int, explore_len: int = 40, verbose: bool = False) -> dict:
+        env = self.arc.make(self.game)
+        obs = env.step(GameAction.RESET)
+        f = frame_of(obs)
+        if f is None:
+            return {"game": self.game, "error": "no initial frame"}
+        k0 = self.key(f, 0)
+        self.archive[k0] = Entry(b"", 0)
+        self.remember(b"", env)
+
+        t0 = time.time()
+        while self.steps < budget_steps:
+            parent = self.select()
+            restored = self.restore(parent.traj)
+            if isinstance(restored, tuple):
+                env, obs = restored
+            else:
+                env, obs = restored, None
+            if obs is None:
+                obs = env._last_response
+            frame = frame_of(obs)
+            traj = unpack(parent.traj)
+            parent.chosen += 1
+
+            last = None
+            for _ in range(explore_len):
+                if self.steps >= budget_steps:
+                    break
+                cands = action_candidates(env, frame, self.rng)
+                if not cands:
+                    break
+                if last is not None and last in cands and self.rng.random() < 0.5:
+                    a, x, y = last          # sticky: keep going the same way
+                else:
+                    a, x, y = self.rng.choice(cands)
+                last = (a, x, y)
+                act = BY_VALUE[a]
+                obs = env.step(act, data={"x": x, "y": y} if act.is_complex() else {})
+                self.steps += 1
+                traj = traj + [(a, x, y)]
+
+                if obs is None:
+                    break
+                frame = frame_of(obs)
+                levels = int(obs.levels_completed)
+
+                if obs.state is GameState.GAME_OVER:
+                    # Only RESET is legal now; it restarts this level and keeps
+                    # the levels we already finished.
+                    obs = env.step(GameAction.RESET)
+                    self.steps += 1
+                    traj = traj + [(GameAction.RESET.value, 0, 0)]
+                    frame = frame_of(obs)
+                    if frame is None:
+                        break
+                    levels = int(obs.levels_completed)
+
+                if frame is None:
+                    break
+
+                if levels > self.max_levels:
+                    self.max_levels = levels
+                    if verbose:
+                        print(f"    [{self.game}] level {levels} at {len(traj)} actions "
+                              f"({self.steps} sim steps, {time.time() - t0:.0f}s)", flush=True)
+                if levels not in self.best_by_level or len(traj) < len(self.best_by_level[levels]):
+                    self.best_by_level[levels] = list(traj)
+
+                k = self.key(frame, levels)
+                cur = self.archive.get(k)
+                packed = pack(traj)
+                if cur is None:
+                    self.archive[k] = Entry(packed, levels)
+                    if len(packed) > 3 * 32:
+                        self.remember(packed, env)
+                elif len(packed) < len(cur.traj):
+                    # Same state, cheaper route: keep the cheap one. This is
+                    # what turns the archive into an action-count optimiser.
+                    self.snaps.pop(cur.traj, None)
+                    cur.traj = packed
+                    cur.visits = 0
+
+                if obs.state is GameState.WIN:
+                    break
+
+        return self.report(time.time() - t0)
+
+    def select(self) -> Entry:
+        """Prefer deep progress, then rarely-visited and cheap-to-restore states."""
+        best, best_w = None, -1.0
+        n = len(self.archive)
+        sample = self.rng.sample(list(self.archive.values()), min(n, 64))
+        for e in sample:
+            w = (e.levels * 1000.0
+                 + 1.0 / (1.0 + e.chosen) ** 0.5 * 100.0
+                 - len(e.traj) * 0.01
+                 + self.rng.random())
+            if w > best_w:
+                best, best_w = e, w
+        best.visits += 1
+        return best
+
+    def report(self, seconds: float) -> dict:
+        levels = sorted(self.best_by_level)
+        return {
+            "game": self.game,
+            "sim_steps": self.steps,
+            "replay_steps": self.replayed,
+            "snapshots": len(self.snaps),
+            "seconds": round(seconds, 1),
+            "archive": len(self.archive),
+            "max_levels": self.max_levels,
+            "actions_to_level": {str(L): len(self.best_by_level[L]) for L in levels},
+            "solutions": {str(L): self.best_by_level[L] for L in levels},
+        }
+
+
+def solve(game: str, budget: int, seed: int, explore_len: int, verbose: bool) -> dict:
+    try:
+        s = Solver(game, seed=seed)
+        return s.run(budget, explore_len=explore_len, verbose=verbose)
+    except Exception:
+        import traceback
+        return {"game": game, "error": traceback.format_exc(limit=8)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--games", default=None, help="comma list; default = all")
+    ap.add_argument("--budget", type=int, default=200_000, help="simulated steps per game")
+    ap.add_argument("--explore-len", type=int, default=40)
+    ap.add_argument("--jobs", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--out", default="solutions")
+    args = ap.parse_args()
+
+    quiet()
+    arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
+    all_ids = [e.game_id.split("-")[0] for e in arc.get_environments()]
+    games = [g.strip() for g in args.games.split(",")] if args.games else all_ids
+
+    outdir = Path(args.out)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    def finish(r: dict) -> None:
+        if r.get("error"):
+            print(f"  {r['game']:6} ERROR {r['error'].splitlines()[-1][:80]}", flush=True)
+            return
+        base = (outdir / f"{r['game']}.json")
+        base.write_text(json.dumps(r, indent=1))
+        print(f"  {r['game']:6} levels={r['max_levels']:2}  "
+              f"actions={r['actions_to_level']}  archive={r['archive']:6}  "
+              f"explore={r['sim_steps']} replay={r['replay_steps']} "
+              f"snaps={r['snapshots']}  {r['seconds']}s", flush=True)
+
+    if args.jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+            futs = [ex.submit(solve, g, args.budget, args.seed, args.explore_len, False)
+                    for g in games]
+            for f in as_completed(futs):
+                finish(f.result())
+    else:
+        for g in games:
+            finish(solve(g, args.budget, args.seed, args.explore_len, True))
+
+
+if __name__ == "__main__":
+    main()

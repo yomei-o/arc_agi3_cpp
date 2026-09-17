@@ -174,12 +174,20 @@ struct Motion {
   Motion() : color(-1), anchor(-1), found(false) {}
 };
 
+// An avatar is a small sprite. Anything bigger than this is scenery, a camera
+// pan or a whole-row repaint, and adopting it as the avatar is how the agent
+// previously ended up "controlling" a 46x9 object and marking more squares
+// blocked than the board has.
+constexpr int MAX_AVATAR_CELLS = 100;
+constexpr int MAX_AVATAR_SIDE = 16;
+
 // Explain part of a frame transition as "a shape of one colour translated".
-// `only_color` < 0 means "consider every colour"; the largest moved shape wins.
+// `only_color` < 0 means "consider every colour"; the SMALLEST plausible moved
+// shape wins, because that is what an avatar looks like.
 Motion detect_translation(const Grid& a, const Grid& b, const std::set<int>& bg,
                           int only_color) {
   Motion best;
-  int best_area = 0;
+  int best_area = 1 << 30;
 
   std::map<int, std::vector<int> > vanished, appeared;
   int ndiff = 0;
@@ -198,8 +206,18 @@ Motion detect_translation(const Grid& a, const Grid& b, const std::set<int>& bg,
     if (ai == appeared.end()) continue;
     const std::vector<int>& from = kv->second;
     const std::vector<int>& to = ai->second;
-    if (from.size() != to.size() || from.empty() || from.size() > 300) continue;
-    if (int(from.size()) <= best_area) continue;
+    if (from.size() != to.size() || from.empty()) continue;
+    if (int(from.size()) > MAX_AVATAR_CELLS * 2) continue;
+    if (int(from.size()) >= best_area) continue;
+
+    // The changed cells must sit in a sprite-sized box, not span the board.
+    int mnx = W, mny = H, mxx = -1, mxy = -1;
+    for (size_t k = 0; k < from.size(); ++k) {
+      int x = from[k] % W, y = from[k] / W;
+      mnx = std::min(mnx, x); mxx = std::max(mxx, x);
+      mny = std::min(mny, y); mxy = std::max(mxy, y);
+    }
+    if (mxx - mnx + 1 > MAX_AVATAR_SIDE * 2 || mxy - mny + 1 > MAX_AVATAR_SIDE * 2) continue;
 
     int fx = from[0] % W, fy = from[0] / W;
     for (size_t t = 0; t < to.size(); ++t) {
@@ -322,14 +340,19 @@ struct Agent {
     return c > 0 && !v.zero();
   }
 
-  // Adopt the moved shape as the avatar and re-measure its bounding box.
-  void adopt(const Motion& m) {
-    av_color = m.color;
+  // Adopt the moved shape as the avatar, if it is sprite-sized. A translation
+  // can also come from a camera pan or a repainted row; those are not something
+  // we control, and believing otherwise poisons the whole map.
+  bool adopt(const Motion& m) {
     Box b = component_at(cur, m.anchor, 0);
+    if (b.area > MAX_AVATAR_CELLS || b.w() > MAX_AVATAR_SIDE || b.h() > MAX_AVATAR_SIDE)
+      return false;
+    av_color = m.color;
     ax = b.minx;
     ay = b.miny;
     av_w = b.w();
     av_h = b.h();
+    return true;
   }
 
   // Squares the avatar can stand on, in its own movement lattice.

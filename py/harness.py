@@ -138,6 +138,16 @@ def main() -> None:
     games = [g.strip() for g in args.games.split(",")] if args.games else all_ids
 
     agent_path = str(Path(args.agent).resolve())
+
+    # Build the C++ core once, here, before any workers exist. Letting N
+    # processes discover it missing and race to build it means some of them
+    # quietly fall back to the Python policy and the run measures a mixture.
+    _warm = importlib.util.spec_from_file_location("warm_agent", agent_path)
+    _m = importlib.util.module_from_spec(_warm)
+    _warm.loader.exec_module(_m)
+    if _m._core() is None:
+        print("  WARNING: C++ core unavailable; measuring the Python fallback", flush=True)
+
     results = []
     if args.jobs > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as ex:
