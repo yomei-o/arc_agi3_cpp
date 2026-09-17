@@ -62,6 +62,7 @@ CPP_SOURCE = r"""// arc3_core.cpp - ARC-AGI-3 agent core. Zero dependencies, C++
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <queue>
@@ -559,6 +560,9 @@ struct Agent {
   //     there, instead of only doing so on death or when circling
   // 4 = plan inside the learned model, act on the first move, re-plan (MPC)
   int explore_mode;
+  int alpha_objects;   // how many object centroids the search may click
+  int alpha_grid;      // plus this many coarse-grid points, for background hits
+  int depth_cap;       // how far from the level start the search may wander
   int rollout_len;
   int since_restart;
 
@@ -634,7 +638,8 @@ struct Agent {
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
         idd_active(false), idd_try_solution(false), ge_here(0), ge_ready(false),
-        explore_mode(2), rollout_len(60), since_restart(0), have_scene(false),
+        explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
+        rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
         replaying(false), restarts(0) {
@@ -1237,10 +1242,21 @@ struct Agent {
         order.push_back(std::make_pair(hist[c] * 4 + comps[i].area, int(i)));
       }
       std::sort(order.begin(), order.end());
-      size_t take = idd_actions.empty() ? 10 : 4;
+      // Measured against the compressed offline solutions: the winning clicks
+      // are object centroids, but they sit at ranks 11, 14, 17 and 24 in this
+      // ordering, so a top-10 alphabet simply never offers them. VC33's level 2
+      // also needs a click on bare background, which no centroid covers, hence
+      // the grid points.
+      size_t take = idd_actions.empty() ? size_t(alpha_objects) : size_t(alpha_objects) / 3;
       for (size_t i = 0; i < order.size() && i < take; ++i) {
         const Box& b = comps[order[i].second];
         idd_actions.push_back(Act(A6, b.cx(), b.cy()));
+      }
+      if (alpha_grid > 0) {
+        int step = std::max(1, int(std::sqrt(double(NCELL) / double(alpha_grid))));
+        for (int y = step / 2; y < H; y += step)
+          for (int x = step / 2; x < W; x += step)
+            idd_actions.push_back(Act(A6, x, y));
       }
     }
   }
@@ -1367,7 +1383,11 @@ if (explore_mode == 6 && ge_ready && !idd_actions.empty()) {
       }
 
       // Dead means only RESET is legal; take it and go back somewhere useful.
-      if (last_state != 3) {
+      // So does wandering too far: the compressed offline solutions run from
+      // two to seventeen actions, so depth beyond that is almost certainly not
+      // where the answer is, and a depth-first walk that keeps going never
+      // returns to try the rest of the alphabet near the start.
+      if (last_state != 3 && int(level_traj.size()) < depth_cap) {
         int& t = ge_tried[ge_here];
         if (t < int(idd_actions.size())) {
           Act a = idd_actions[t++];
@@ -1653,6 +1673,19 @@ ARC3_API void arc3_set_explore(int h, int mode) {
   g_agents[h]->explore_mode = mode;
 }
 
+// How many click targets the search may consider. Bigger alphabets cover more
+// of the board and cost more probes per state.
+ARC3_API void arc3_set_alphabet(int h, int objects, int grid) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->alpha_objects = objects;
+  g_agents[h]->alpha_grid = grid;
+}
+
+ARC3_API void arc3_set_depth(int h, int cap) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->depth_cap = cap;
+}
+
 ARC3_API void arc3_free(int h) {
   if (h >= 0 && h < int(g_agents.size()) && g_agents[h]) {
     delete g_agents[h];
@@ -1788,6 +1821,8 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_choose.restype = ctypes.c_int
     dll.arc3_stats.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
 
@@ -1847,6 +1882,10 @@ class MyAgent(Agent):
             # 0 directed, 1 sticky-random, 2 mixed, 3 systematic Go-Explore.
             # Measured on the 25 public games: 0 scores 0.12, the others 0.00.
             core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "0")))
+            core.arc3_set_alphabet(self._h,
+                                   int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
+                                   int(os.environ.get("ARC3_ALPHA_GRID", "8")))
+            core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
@@ -1908,7 +1947,9 @@ class MyAgent(Agent):
     STAT_NAMES = ("avatar_known", "avatar_color", "ax", "ay", "steps", "levels",
                   "trigger", "blocked", "av_w", "av_h", "plan", "stagnant",
                   "touched", "escalation", "states", "restarts",
-                  "rules", "goals", "walls")
+                  "rules", "goals", "walls", "wm_obs", "wm_classes", "scenes",
+                  "objects", "bfs_queue", "probes", "alphabet", "solution_len",
+                  "pruned", "bfs_head", "routes", "expanded")
 
     def cleanup(self, *args: Any, **kwargs: Any) -> None:
         core = _core()

@@ -101,6 +101,8 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_choose.restype = ctypes.c_int
     dll.arc3_stats.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
 
@@ -160,6 +162,10 @@ class MyAgent(Agent):
             # 0 directed, 1 sticky-random, 2 mixed, 3 systematic Go-Explore.
             # Measured on the 25 public games: 0 scores 0.12, the others 0.00.
             core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "0")))
+            core.arc3_set_alphabet(self._h,
+                                   int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
+                                   int(os.environ.get("ARC3_ALPHA_GRID", "8")))
+            core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
@@ -221,7 +227,9 @@ class MyAgent(Agent):
     STAT_NAMES = ("avatar_known", "avatar_color", "ax", "ay", "steps", "levels",
                   "trigger", "blocked", "av_w", "av_h", "plan", "stagnant",
                   "touched", "escalation", "states", "restarts",
-                  "rules", "goals", "walls")
+                  "rules", "goals", "walls", "wm_obs", "wm_classes", "scenes",
+                  "objects", "bfs_queue", "probes", "alphabet", "solution_len",
+                  "pruned", "bfs_head", "routes", "expanded")
 
     def cleanup(self, *args: Any, **kwargs: Any) -> None:
         core = _core()
