@@ -59,7 +59,7 @@ def main() -> None:
         t = truth(f.read_text(encoding="utf-8"))
         a = ans.get(g, "")
         if t is None:
-            print(f"  {g}: 動く物体が無い(クリック専用など) — 採点対象外")
+            print(f"  {g}: 動く物体が無い(クリック専用など) - 採点対象外")
             skip += 1
             continue
         glyph, x, y = t
