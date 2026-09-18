@@ -38,6 +38,8 @@
 #include <set>
 #include <vector>
 
+#include "arc3_net.h"
+
 #if defined(_WIN32)
 #define ARC3_API extern "C" __declspec(dllexport)
 #else
@@ -598,6 +600,27 @@ struct Agent {
   // LS20, which buys only 54 states out of 1500 actions. But while the search
   // is moving forward it is already standing in the state it wants to expand,
   // so a probe costs exactly one action. Only a dead end needs a restore.
+  // Mode 9: the official sample's policy, learned rather than counted.
+  //
+  // Mode 8 counts how often each action and each coordinate changed the frame.
+  // That has no idea what the board looks like - a coordinate that works only
+  // when a door is open gets one number for both cases. The sample instead
+  // trains a CNN conditioned on the frame, which can say "this spot works NOW".
+  // Same target (did the frame change?), same sampling, a network small enough
+  // for a CPU (see arc3_net.h).
+  struct Exp {
+    std::array<int8_t, 32 * 32> s32;
+    int action_idx;
+    float reward;
+  };
+  arc3net::ActionNet net;
+  std::vector<Exp> replay;
+  std::set<uint64_t> replay_seen;
+  std::array<int8_t, 32 * 32> prev_s32;
+  bool have_prev_s32;
+  int prev_action_idx;
+  int train_every, train_batch;
+
   // Mode 8: a tabular version of what the official sample learns.
   //
   // StochasticGoose trains a CNN to predict which actions produce a NEW frame,
@@ -614,7 +637,7 @@ struct Agent {
   std::map<uint64_t, std::vector<Act> > ge_route;   // cheapest route to a state
   std::map<uint64_t, int> ge_tried;                 // alphabet entries tried there
   uint64_t ge_here;
-  bool ge_ready;
+  bool ge_ready;   // set in the constructor body; declaration order differs
 
   WorldModel wm;
   Scene cur_scene;
@@ -649,13 +672,19 @@ struct Agent {
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
-        idd_active(false), idd_try_solution(false), ge_here(0), ge_ready(false),
+        idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
         budget(4000), phase_mode(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
         replaying(false), restarts(0) {
+    ge_ready = false;
+    have_prev_s32 = false;
+    prev_action_idx = -1;
+    train_every = 20;
+    train_batch = 16;
+    prev_s32.fill(0);
     click_x = click_y = -1;
     click_live = false;
     click_tries.fill(0);
@@ -924,6 +953,14 @@ struct Agent {
     ge_route.clear();
     ge_tried.clear();
     ge_ready = false;
+    if (explore_mode == 9) {
+      // A new level is a different distribution; the sample rebuilds its
+      // network here and so do we.
+      net.reset();
+      replay.clear();
+      replay_seen.clear();
+      have_prev_s32 = false;
+    }
     if (explore_mode == 5 || explore_mode == 6) idd_begin();
   }
 
@@ -1078,6 +1115,21 @@ struct Agent {
       } else {
         ++idd_pruned;
       }
+    }
+
+    if (explore_mode == 9 && have_prev_s32 && prev_action_idx >= 0) {
+      uint64_t h = exp_hash(prev_s32, prev_action_idx);
+      if (replay_seen.insert(h).second) {
+        Exp e;
+        e.s32 = prev_s32;
+        e.action_idx = prev_action_idx;
+        e.reward = changed ? 1.0f : 0.0f;
+        replay.push_back(e);
+        if (replay.size() > 20000) {
+          replay.erase(replay.begin(), replay.begin() + 5000);
+        }
+      }
+      have_prev_s32 = false;
     }
 
     if (have_prev && last_action >= 0 && last_action < 8) {
@@ -1387,8 +1439,126 @@ struct Agent {
     return emit(a.a, a.x, a.y);
   }
 
+static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
+    for (int y = 0; y < 32; ++y)
+      for (int x = 0; x < 32; ++x) out[y * 32 + x] = g.c[(y * 2) * W + (x * 2)];
+  }
+
+  static uint64_t exp_hash(const std::array<int8_t, 32 * 32>& s, int a) {
+    uint64_t h = 1469598103934665603ULL ^ uint64_t(a + 1) * 1099511628211ULL;
+    for (size_t i = 0; i < s.size(); ++i) { h ^= uint8_t(s[i]); h *= 1099511628211ULL; }
+    return h;
+  }
+
+  void net_train() {
+    if (int(replay.size()) < train_batch) return;
+    const int B = train_batch;
+    std::vector<float> xs(size_t(B) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW, 0.0f);
+    std::vector<float> mask(size_t(B) * arc3net::N_OUT, 0.0f);
+    std::vector<float> ys(B, 0.0f);
+    std::array<int8_t, NCELL> full;
+    for (int b = 0; b < B; ++b) {
+      const Exp& e = replay[rng() % replay.size()];
+      // encode() wants a 64x64 frame; the replay keeps the 32x32 subsample, so
+      // widen it back out rather than storing sixteen times the memory.
+      for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+          int8_t v = e.s32[y * 32 + x];
+          full[(y * 2) * W + (x * 2)] = v;
+          full[(y * 2) * W + (x * 2) + 1] = v;
+          full[(y * 2 + 1) * W + (x * 2)] = v;
+          full[(y * 2 + 1) * W + (x * 2) + 1] = v;
+        }
+      arc3net::encode(full.data(),
+                      xs.data() + size_t(b) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+      mask[size_t(b) * arc3net::N_OUT + e.action_idx] = 1.0f;
+      ys[b] = e.reward;
+    }
+    ag::Tensor x = ag::Tensor::from(xs, {B, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor logits = net.forward(x);
+    ag::Tensor m = ag::Tensor::from(mask, {B, arc3net::N_OUT}, false);
+    ag::Tensor ones = ag::Tensor::from(std::vector<float>(arc3net::N_OUT, 1.0f),
+                                       {arc3net::N_OUT, 1}, false);
+    ag::Tensor picked = ag::matmul(ag::mul(logits, m), ones);
+    ag::Tensor loss = arc3net::bce_with_logits(picked, ys);
+    net.opt.zero_grad();
+    loss.backward();
+    net.opt.step();
+  }
+
+  // Ask the network which action is most likely to change something, and sample
+  // from it. Actions the game does not offer are removed first.
+  int net_choose() {
+    std::vector<float> one(arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+    arc3net::encode(cur.c.data(), one.data());
+    ag::Tensor x = ag::Tensor::from(one, {1, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor logits = net.forward(x);
+
+    std::vector<double> w(arc3net::N_OUT, 0.0);
+    double total = 0.0;
+    for (int i = 0; i < arc3net::N_SIMPLE; ++i) {
+      int act = A1 + i;
+      if (std::find(avail.begin(), avail.end(), act) == avail.end()) continue;
+      w[i] = 1.0 / (1.0 + std::exp(-double(logits.data()[i])));
+      total += w[i];
+    }
+    if (has6) {
+      for (int i = 0; i < arc3net::N_COORD; ++i) {
+        int k = arc3net::N_SIMPLE + i;
+        w[k] = 1.0 / (1.0 + std::exp(-double(logits.data()[k])));
+        total += w[k];
+      }
+    }
+    if (total <= 0.0) return emit(avail.empty() ? A1 : avail[rng() % avail.size()], 0, 0);
+
+    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    int pick = -1;
+    for (int i = 0; i < arc3net::N_OUT; ++i) {
+      if (w[i] <= 0.0) continue;
+      r -= w[i];
+      if (r <= 0.0) { pick = i; break; }
+    }
+    if (pick < 0) pick = arc3net::N_SIMPLE - 1;
+
+    subsample(cur, prev_s32);
+    have_prev_s32 = true;
+    prev_action_idx = pick;
+
+    if (pick < arc3net::N_SIMPLE) return emit(A1 + pick, 0, 0);
+    int cell = pick - arc3net::N_SIMPLE;
+    int cx = (cell % arc3net::COORD_HW) * 4 + 2;
+    int cy = (cell / arc3net::COORD_HW) * 4 + 2;
+    return emit(A6, cx, cy);
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    if (explore_mode == 9) {
+      if (last_state == 3) return emit(A_RESET, 0, 0);
+      if (!calib_queue.empty()) {
+        int a = calib_queue.front();
+        calib_queue.erase(calib_queue.begin());
+        return emit(a);
+      }
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      // Whatever we learned about where a level ends still beats guessing.
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      if (steps % train_every == 0) net_train();
+      return net_choose();
+    }
 
     if (explore_mode == 8) {
       if (last_state == 3) return emit(A_RESET, 0, 0);

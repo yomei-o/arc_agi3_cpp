@@ -55,7 +55,10 @@ def _build_core() -> ctypes.CDLL | None:
         cpp = outdir / f"arc3_core_{tag}_{os.getpid()}.cpp"
         cpp.write_text(src, encoding="utf-8")
         tmp = outdir / f"arc3_core_{tag}_{os.getpid()}.building{ext}"
-        cmd = ["g++", "-O2", "-std=c++17", "-shared"]
+        # -pthread: the autograd engine parallelises convolutions over the
+        # batch with std::thread, and on Linux that needs the flag at both
+        # compile and link time or the threads fail at runtime.
+        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread"]
         if sys.platform != "win32":
             cmd.append("-fPIC")
         cmd += [str(cpp), "-o", str(tmp)]
@@ -161,9 +164,11 @@ class MyAgent(Agent):
         if core is not None:
             arr = (ctypes.c_int * len(acts))(*acts)
             self._h = core.arc3_new(arr, len(acts))
-            # 0 directed, 1 sticky-random, 2 mixed, 3 systematic Go-Explore.
-            # Measured on the 25 public games: 0 scores 0.12, the others 0.00.
-            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "0")))
+            # 8 = count, per action and per coordinate, how often it changed the
+            # frame, and sample by the posterior mean. It is the official
+            # sample's idea without the network, and on the 25 public games it
+            # completes 8 levels against 3-4 for every other mode here.
+            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
             core.arc3_set_alphabet(self._h,
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "8")))

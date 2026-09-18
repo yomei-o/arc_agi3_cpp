@@ -70,6 +70,344 @@ CPP_SOURCE = r"""// arc3_core.cpp - ARC-AGI-3 agent core. Zero dependencies, C++
 #include <set>
 #include <vector>
 
+// ---- begin arc3_net.h ----
+// arc3_net.h - the official sample's idea, in C++, at a size a CPU can afford.
+//
+// StochasticGoose (the ARC-AGI-3 sample submission, and the thing every team on
+// the leaderboard is standing on) trains a CNN to predict, for each action and
+// each of the 4096 click coordinates, whether taking it will produce a NEW
+// frame, and samples from that. It is a novelty policy with a learned, state-
+// conditioned prior, and it is worth about 3.5 points.
+//
+// Porting it verbatim does not work here. Its backbone runs 256 channels at the
+// full 64x64, which is ~3.15 G multiply-accumulates per forward pass, and it
+// trains on a batch of 64 every 5 actions. That is fine on the T4 it was written
+// for and hopeless on a CPU.
+//
+// It is also more network than the problem needs. The board is drawn several
+// pixels per logical cell (5 on LS20, 3 on TU93, 4 on WA30), so a 64x64
+// coordinate head is predicting at roughly sixteen times the resolution the game
+// actually has. This version works on a 32x32 subsample with narrow channels and
+// puts the coordinate head at 16x16 - one output per logical cell - which comes
+// to about 7 M MAC per forward, some 450x cheaper, and predicts at the
+// resolution the game is played at.
+//
+// The autograd engine underneath is yomei-o's, from othello_alphazero_cpp
+// (originally mini-yolov5-cpp): ag/autograd.{h,cpp}, no external dependencies.
+
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+// ---- begin autograd.h ----
+#pragma once
+// A tiny reverse-mode autograd engine in pure C++ (no external deps).
+// Tensors are dense row-major float arrays that remember how they were
+// computed, so calling backward() on a scalar populates .grad() on every
+// tensor that fed into it. This is the "understand training by building it"
+// core of the from-scratch YOLO.
+#include <vector>
+#include <memory>
+#include <functional>
+#include <string>
+#include <cstddef>
+
+namespace ag {
+
+struct Node {
+    std::vector<float> data;     // forward values (row-major)
+    std::vector<float> grad;     // dLoss/dthis, same size as data
+    std::vector<int> shape;
+    std::vector<std::shared_ptr<Node>> parents;  // keep the graph alive
+    std::function<void()> backward_fn;           // accumulate into parents' grad
+    bool requires_grad = false;
+    std::string op;
+
+    int numel() const {
+        int n = 1;
+        for (int s : shape) n *= s;
+        return n;
+    }
+};
+using NodePtr = std::shared_ptr<Node>;
+
+class Tensor {
+public:
+    NodePtr n;
+    Tensor() = default;
+    explicit Tensor(NodePtr node) : n(std::move(node)) {}
+
+    static Tensor zeros(std::vector<int> shape, bool requires_grad = false);
+    static Tensor from(std::vector<float> data, std::vector<int> shape,
+                       bool requires_grad = false);
+    static Tensor randn(std::vector<int> shape, float std = 1.0f,
+                        bool requires_grad = false);
+
+    std::vector<int>& shape() const { return n->shape; }
+    std::vector<float>& data() const { return n->data; }
+    std::vector<float>& grad() const { return n->grad; }
+    int numel() const { return n->numel(); }
+    float item() const { return n->data[0]; }
+
+    void backward() const;     // seed grad=1 on a scalar, run reverse-topo
+    void zero_grad() const;    // zero this node's grad (used on parameters)
+};
+
+// Build a fresh output node wired to `parents`. Caller fills data + backward_fn.
+Tensor make_op(std::vector<int> shape, std::vector<NodePtr> parents,
+               const std::string& op);
+
+// ---- elementwise & reductions ----
+Tensor add(const Tensor& a, const Tensor& b);   // same shape
+Tensor sub(const Tensor& a, const Tensor& b);   // same shape
+Tensor mul(const Tensor& a, const Tensor& b);   // same shape (Hadamard)
+Tensor mul_scalar(const Tensor& a, float s);
+Tensor add_scalar(const Tensor& a, float s);
+Tensor sum(const Tensor& a);                    // -> scalar
+Tensor mean(const Tensor& a);                   // -> scalar
+
+// ---- linear algebra ----
+Tensor matmul(const Tensor& a, const Tensor& b);  // (m,k)x(k,n) -> (m,n)
+
+// ---- conv / pooling (NCHW) ----
+// x:(N,C,H,W) w:(O,C,kh,kw) b:(O) -> (N,O,OH,OW)
+Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor& b, int stride, int pad);
+Tensor maxpool2d(const Tensor& x, int k, int stride, int pad);
+Tensor upsample_nearest2d(const Tensor& x, int scale);
+// BatchNorm over (N,C,H,W), per-channel. gamma/beta are learnable (C);
+// running_mean/running_var are non-grad buffers, updated in place when training.
+Tensor batchnorm2d(const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   Tensor& running_mean, Tensor& running_var,
+                   bool training, float momentum = 0.1f, float eps = 1e-5f);
+// add a per-channel bias (O) to (N,O,H,W)
+Tensor add_bias_nchw(const Tensor& x, const Tensor& b);
+// concatenate a list of (N,C_i,H,W) along channels
+Tensor cat_channels(const std::vector<Tensor>& xs);
+// slice channels [c0,c1) of (N,C,H,W)
+Tensor slice_channels(const Tensor& x, int c0, int c1);
+
+// ---- elementwise math (for CIoU); all same-shape ----
+Tensor maximum(const Tensor& a, const Tensor& b);
+Tensor minimum(const Tensor& a, const Tensor& b);
+Tensor divide(const Tensor& a, const Tensor& b);
+Tensor sqrt_(const Tensor& a);
+Tensor atan_(const Tensor& a);
+Tensor clamp_min(const Tensor& a, float m);
+
+// ---- activations ----
+Tensor relu(const Tensor& a);
+Tensor sigmoid(const Tensor& a);
+Tensor silu(const Tensor& a);
+Tensor tanh_(const Tensor& a);          // value head squashing to (-1,1)
+
+// ---- shape / fully-connected helpers (added for AlphaZero heads) ----
+// Reinterpret the flat data under a new shape (same numel); grad flows straight
+// through. Used to flatten conv features (N,C,H,W) -> (N, C*H*W) for an FC layer.
+Tensor reshape(const Tensor& a, std::vector<int> shape);
+// x:(N,A) + b:(A) broadcast over rows -> (N,A). The bias term of an FC layer.
+Tensor add_bias_2d(const Tensor& x, const Tensor& b);
+// Row-wise log-softmax over (N,A) (numerically stable). Policy head uses this so
+// the cross-entropy loss -sum(pi * log_softmax) is well-conditioned.
+Tensor log_softmax_rows(const Tensor& a);
+
+// operator sugar
+inline Tensor operator+(const Tensor& a, const Tensor& b) { return add(a, b); }
+inline Tensor operator-(const Tensor& a, const Tensor& b) { return sub(a, b); }
+inline Tensor operator*(const Tensor& a, const Tensor& b) { return mul(a, b); }
+
+// RNG control (deterministic, no <random> global state surprises).
+void seed(uint64_t s);
+float randf();  // uniform [0,1)
+
+}  // namespace ag
+// ---- end autograd.h ----
+
+namespace arc3net {
+
+constexpr int IN_C = 16;    // one-hot over the 16 ARC colours
+constexpr int IN_HW = 32;   // 64x64 subsampled by 2
+constexpr int COORD_HW = 16;      // one coordinate output per logical cell
+constexpr int N_SIMPLE = 5;       // ACTION1..ACTION5
+constexpr int N_COORD = COORD_HW * COORD_HW;
+constexpr int N_OUT = N_SIMPLE + N_COORD;
+
+// ---------------------------------------------------------------------------
+// Binary cross-entropy straight on the logits.
+//
+// The engine has sigmoid but no log, and composing BCE out of what is there
+// would be numerically poor near saturation. Written directly it is also the
+// simplest possible backward: d/dz = (sigmoid(z) - y) / N.
+// ---------------------------------------------------------------------------
+inline ag::Tensor bce_with_logits(const ag::Tensor& z, const std::vector<float>& y) {
+  const int n = z.numel();
+  ag::Tensor out = ag::make_op({1}, {z.n}, "bce_with_logits");
+  const std::vector<float>& zd = z.data();
+
+  double total = 0.0;
+  for (int i = 0; i < n; ++i) {
+    float v = zd[i];
+    // log(1+exp(-|v|)) + max(v,0) - v*y, the stable form.
+    total += std::max(v, 0.0f) - v * y[i] + std::log1p(std::exp(-std::fabs(v)));
+  }
+  out.data()[0] = float(total / std::max(1, n));
+
+  ag::Node* Z = z.n.get();
+  ag::Node* O = out.n.get();
+  std::vector<float> yy = y;
+  out.n->backward_fn = [Z, O, yy, n]() {
+    float g = O->grad[0] / std::max(1, n);
+    for (int i = 0; i < n; ++i) {
+      float s = 1.0f / (1.0f + std::exp(-Z->data[i]));
+      Z->grad[i] += g * (s - yy[i]);
+    }
+  };
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Adam. Same defaults as the sample's optimiser, a larger step because this
+// network is much smaller.
+// ---------------------------------------------------------------------------
+struct Adam {
+  std::vector<ag::Tensor> params;
+  std::vector<std::vector<float> > m, v;
+  float lr, b1, b2, eps;
+  long t;
+
+  Adam() : lr(1e-3f), b1(0.9f), b2(0.999f), eps(1e-8f), t(0) {}
+
+  void attach(const std::vector<ag::Tensor>& ps) {
+    params = ps;
+    m.assign(ps.size(), {});
+    v.assign(ps.size(), {});
+    for (size_t i = 0; i < ps.size(); ++i) {
+      m[i].assign(ps[i].numel(), 0.0f);
+      v[i].assign(ps[i].numel(), 0.0f);
+    }
+    t = 0;
+  }
+
+  void zero_grad() {
+    for (size_t i = 0; i < params.size(); ++i) params[i].zero_grad();
+  }
+
+  void step() {
+    ++t;
+    float c1 = 1.0f - std::pow(b1, float(t));
+    float c2 = 1.0f - std::pow(b2, float(t));
+    for (size_t i = 0; i < params.size(); ++i) {
+      std::vector<float>& p = params[i].data();
+      std::vector<float>& g = params[i].grad();
+      for (size_t j = 0; j < p.size(); ++j) {
+        m[i][j] = b1 * m[i][j] + (1 - b1) * g[j];
+        v[i][j] = b2 * v[i][j] + (1 - b2) * g[j] * g[j];
+        float mh = m[i][j] / c1, vh = v[i][j] / c2;
+        p[j] -= lr * mh / (std::sqrt(vh) + eps);
+      }
+    }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// The network.
+//
+//   conv 16->16  3x3            32x32
+//   conv 16->32  3x3 stride 2   16x16
+//   conv 32->32  3x3            16x16
+//   action head  maxpool 4 -> 32*4*4=512 -> 64 -> 5
+//   coord  head  conv 32->16 3x3 -> conv 16->1 1x1 -> 16x16 flattened
+// ---------------------------------------------------------------------------
+struct ActionNet {
+  ag::Tensor w1, b1_, w2, b2_, w3, b3_;
+  ag::Tensor fcw, fcb, outw, outb;
+  ag::Tensor cw1, cb1, cw2, cb2;
+  Adam opt;
+
+  ActionNet() { reset(); }
+
+  static ag::Tensor kaiming(int o, int c, int k) {
+    float std = std::sqrt(2.0f / float(c * k * k));
+    return ag::Tensor::randn({o, c, k, k}, std, true);
+  }
+
+  // A level change means a different game state distribution; the sample
+  // rebuilds its network at that point and so does this.
+  void reset() {
+    w1 = kaiming(16, IN_C, 3);   b1_ = ag::Tensor::zeros({16}, true);
+    w2 = kaiming(32, 16, 3);     b2_ = ag::Tensor::zeros({32}, true);
+    w3 = kaiming(32, 32, 3);     b3_ = ag::Tensor::zeros({32}, true);
+
+    fcw = ag::Tensor::randn({512, 64}, std::sqrt(2.0f / 512.0f), true);
+    fcb = ag::Tensor::zeros({64}, true);
+    outw = ag::Tensor::randn({64, N_SIMPLE}, std::sqrt(2.0f / 64.0f), true);
+    outb = ag::Tensor::zeros({N_SIMPLE}, true);
+
+    cw1 = kaiming(16, 32, 3);    cb1 = ag::Tensor::zeros({16}, true);
+    cw2 = kaiming(1, 16, 1);     cb2 = ag::Tensor::zeros({1}, true);
+
+    std::vector<ag::Tensor> ps;
+    ps.push_back(w1); ps.push_back(b1_);
+    ps.push_back(w2); ps.push_back(b2_);
+    ps.push_back(w3); ps.push_back(b3_);
+    ps.push_back(fcw); ps.push_back(fcb);
+    ps.push_back(outw); ps.push_back(outb);
+    ps.push_back(cw1); ps.push_back(cb1);
+    ps.push_back(cw2); ps.push_back(cb2);
+    opt.attach(ps);
+  }
+
+  // x: (N, 16, 32, 32) -> (N, N_OUT)
+  ag::Tensor forward(const ag::Tensor& x) {
+    ag::Tensor h = ag::relu(ag::conv2d(x, w1, b1_, 1, 1));
+    h = ag::relu(ag::conv2d(h, w2, b2_, 2, 1));
+    h = ag::relu(ag::conv2d(h, w3, b3_, 1, 1));   // (N,32,16,16)
+    int n = h.shape()[0];
+
+    ag::Tensor a = ag::maxpool2d(h, 4, 4, 0);      // (N,32,4,4)
+    a = ag::reshape(a, {n, 512});
+    a = ag::relu(ag::add_bias_2d(ag::matmul(a, fcw), fcb));
+    a = ag::add_bias_2d(ag::matmul(a, outw), outb);   // (N,5)
+
+    ag::Tensor c = ag::relu(ag::conv2d(h, cw1, cb1, 1, 1));
+    c = ag::conv2d(c, cw2, cb2, 1, 0);             // (N,1,16,16)
+    c = ag::reshape(c, {n, N_COORD});
+
+    // cat_channels works on (N,C,H,W); these are 2-D, so join them by hand.
+    ag::Tensor out = ag::make_op({n, N_OUT}, {a.n, c.n}, "cat_logits");
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < N_SIMPLE; ++j) out.data()[i * N_OUT + j] = a.data()[i * N_SIMPLE + j];
+      for (int j = 0; j < N_COORD; ++j) out.data()[i * N_OUT + N_SIMPLE + j] = c.data()[i * N_COORD + j];
+    }
+    ag::Node* A = a.n.get();
+    ag::Node* C = c.n.get();
+    ag::Node* O = out.n.get();
+    out.n->backward_fn = [A, C, O, n]() {
+      for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < N_SIMPLE; ++j) A->grad[i * N_SIMPLE + j] += O->grad[i * N_OUT + j];
+        for (int j = 0; j < N_COORD; ++j) C->grad[i * N_COORD + j] += O->grad[i * N_OUT + N_SIMPLE + j];
+      }
+    };
+    return out;
+  }
+};
+
+// One-hot a 64x64 frame into (16, 32, 32), sampling every other pixel.
+inline void encode(const int8_t* frame64, float* out) {
+  std::fill(out, out + IN_C * IN_HW * IN_HW, 0.0f);
+  for (int y = 0; y < IN_HW; ++y)
+    for (int x = 0; x < IN_HW; ++x) {
+      int v = frame64[(y * 2) * 64 + (x * 2)];
+      if (v < 0 || v >= IN_C) v = 0;
+      out[(v * IN_HW + y) * IN_HW + x] = 1.0f;
+    }
+}
+
+}  // namespace arc3net
+// ---- end arc3_net.h ----
+
 #if defined(_WIN32)
 #define ARC3_API extern "C" __declspec(dllexport)
 #else
@@ -630,6 +968,27 @@ struct Agent {
   // LS20, which buys only 54 states out of 1500 actions. But while the search
   // is moving forward it is already standing in the state it wants to expand,
   // so a probe costs exactly one action. Only a dead end needs a restore.
+  // Mode 9: the official sample's policy, learned rather than counted.
+  //
+  // Mode 8 counts how often each action and each coordinate changed the frame.
+  // That has no idea what the board looks like - a coordinate that works only
+  // when a door is open gets one number for both cases. The sample instead
+  // trains a CNN conditioned on the frame, which can say "this spot works NOW".
+  // Same target (did the frame change?), same sampling, a network small enough
+  // for a CPU (see arc3_net.h).
+  struct Exp {
+    std::array<int8_t, 32 * 32> s32;
+    int action_idx;
+    float reward;
+  };
+  arc3net::ActionNet net;
+  std::vector<Exp> replay;
+  std::set<uint64_t> replay_seen;
+  std::array<int8_t, 32 * 32> prev_s32;
+  bool have_prev_s32;
+  int prev_action_idx;
+  int train_every, train_batch;
+
   // Mode 8: a tabular version of what the official sample learns.
   //
   // StochasticGoose trains a CNN to predict which actions produce a NEW frame,
@@ -646,7 +1005,7 @@ struct Agent {
   std::map<uint64_t, std::vector<Act> > ge_route;   // cheapest route to a state
   std::map<uint64_t, int> ge_tried;                 // alphabet entries tried there
   uint64_t ge_here;
-  bool ge_ready;
+  bool ge_ready;   // set in the constructor body; declaration order differs
 
   WorldModel wm;
   Scene cur_scene;
@@ -681,13 +1040,19 @@ struct Agent {
         trig_col(-1), trig_area(0), trig_w(0), trig_h(0), trigger_valid(false),
         last_under(-1), stagnant(0), blocked_marks(0), reacquire(0),
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
-        idd_active(false), idd_try_solution(false), ge_here(0), ge_ready(false),
+        idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
         budget(4000), phase_mode(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
         replaying(false), restarts(0) {
+    ge_ready = false;
+    have_prev_s32 = false;
+    prev_action_idx = -1;
+    train_every = 20;
+    train_batch = 16;
+    prev_s32.fill(0);
     click_x = click_y = -1;
     click_live = false;
     click_tries.fill(0);
@@ -956,6 +1321,14 @@ struct Agent {
     ge_route.clear();
     ge_tried.clear();
     ge_ready = false;
+    if (explore_mode == 9) {
+      // A new level is a different distribution; the sample rebuilds its
+      // network here and so do we.
+      net.reset();
+      replay.clear();
+      replay_seen.clear();
+      have_prev_s32 = false;
+    }
     if (explore_mode == 5 || explore_mode == 6) idd_begin();
   }
 
@@ -1110,6 +1483,21 @@ struct Agent {
       } else {
         ++idd_pruned;
       }
+    }
+
+    if (explore_mode == 9 && have_prev_s32 && prev_action_idx >= 0) {
+      uint64_t h = exp_hash(prev_s32, prev_action_idx);
+      if (replay_seen.insert(h).second) {
+        Exp e;
+        e.s32 = prev_s32;
+        e.action_idx = prev_action_idx;
+        e.reward = changed ? 1.0f : 0.0f;
+        replay.push_back(e);
+        if (replay.size() > 20000) {
+          replay.erase(replay.begin(), replay.begin() + 5000);
+        }
+      }
+      have_prev_s32 = false;
     }
 
     if (have_prev && last_action >= 0 && last_action < 8) {
@@ -1419,8 +1807,126 @@ struct Agent {
     return emit(a.a, a.x, a.y);
   }
 
+static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
+    for (int y = 0; y < 32; ++y)
+      for (int x = 0; x < 32; ++x) out[y * 32 + x] = g.c[(y * 2) * W + (x * 2)];
+  }
+
+  static uint64_t exp_hash(const std::array<int8_t, 32 * 32>& s, int a) {
+    uint64_t h = 1469598103934665603ULL ^ uint64_t(a + 1) * 1099511628211ULL;
+    for (size_t i = 0; i < s.size(); ++i) { h ^= uint8_t(s[i]); h *= 1099511628211ULL; }
+    return h;
+  }
+
+  void net_train() {
+    if (int(replay.size()) < train_batch) return;
+    const int B = train_batch;
+    std::vector<float> xs(size_t(B) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW, 0.0f);
+    std::vector<float> mask(size_t(B) * arc3net::N_OUT, 0.0f);
+    std::vector<float> ys(B, 0.0f);
+    std::array<int8_t, NCELL> full;
+    for (int b = 0; b < B; ++b) {
+      const Exp& e = replay[rng() % replay.size()];
+      // encode() wants a 64x64 frame; the replay keeps the 32x32 subsample, so
+      // widen it back out rather than storing sixteen times the memory.
+      for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+          int8_t v = e.s32[y * 32 + x];
+          full[(y * 2) * W + (x * 2)] = v;
+          full[(y * 2) * W + (x * 2) + 1] = v;
+          full[(y * 2 + 1) * W + (x * 2)] = v;
+          full[(y * 2 + 1) * W + (x * 2) + 1] = v;
+        }
+      arc3net::encode(full.data(),
+                      xs.data() + size_t(b) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+      mask[size_t(b) * arc3net::N_OUT + e.action_idx] = 1.0f;
+      ys[b] = e.reward;
+    }
+    ag::Tensor x = ag::Tensor::from(xs, {B, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor logits = net.forward(x);
+    ag::Tensor m = ag::Tensor::from(mask, {B, arc3net::N_OUT}, false);
+    ag::Tensor ones = ag::Tensor::from(std::vector<float>(arc3net::N_OUT, 1.0f),
+                                       {arc3net::N_OUT, 1}, false);
+    ag::Tensor picked = ag::matmul(ag::mul(logits, m), ones);
+    ag::Tensor loss = arc3net::bce_with_logits(picked, ys);
+    net.opt.zero_grad();
+    loss.backward();
+    net.opt.step();
+  }
+
+  // Ask the network which action is most likely to change something, and sample
+  // from it. Actions the game does not offer are removed first.
+  int net_choose() {
+    std::vector<float> one(arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+    arc3net::encode(cur.c.data(), one.data());
+    ag::Tensor x = ag::Tensor::from(one, {1, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor logits = net.forward(x);
+
+    std::vector<double> w(arc3net::N_OUT, 0.0);
+    double total = 0.0;
+    for (int i = 0; i < arc3net::N_SIMPLE; ++i) {
+      int act = A1 + i;
+      if (std::find(avail.begin(), avail.end(), act) == avail.end()) continue;
+      w[i] = 1.0 / (1.0 + std::exp(-double(logits.data()[i])));
+      total += w[i];
+    }
+    if (has6) {
+      for (int i = 0; i < arc3net::N_COORD; ++i) {
+        int k = arc3net::N_SIMPLE + i;
+        w[k] = 1.0 / (1.0 + std::exp(-double(logits.data()[k])));
+        total += w[k];
+      }
+    }
+    if (total <= 0.0) return emit(avail.empty() ? A1 : avail[rng() % avail.size()], 0, 0);
+
+    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    int pick = -1;
+    for (int i = 0; i < arc3net::N_OUT; ++i) {
+      if (w[i] <= 0.0) continue;
+      r -= w[i];
+      if (r <= 0.0) { pick = i; break; }
+    }
+    if (pick < 0) pick = arc3net::N_SIMPLE - 1;
+
+    subsample(cur, prev_s32);
+    have_prev_s32 = true;
+    prev_action_idx = pick;
+
+    if (pick < arc3net::N_SIMPLE) return emit(A1 + pick, 0, 0);
+    int cell = pick - arc3net::N_SIMPLE;
+    int cx = (cell % arc3net::COORD_HW) * 4 + 2;
+    int cy = (cell / arc3net::COORD_HW) * 4 + 2;
+    return emit(A6, cx, cy);
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    if (explore_mode == 9) {
+      if (last_state == 3) return emit(A_RESET, 0, 0);
+      if (!calib_queue.empty()) {
+        int a = calib_queue.front();
+        calib_queue.erase(calib_queue.begin());
+        return emit(a);
+      }
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      // Whatever we learned about where a level ends still beats guessing.
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      if (steps % train_every == 0) net_train();
+      return net_choose();
+    }
 
     if (explore_mode == 8) {
       if (last_state == 3) return emit(A_RESET, 0, 0);
@@ -1948,6 +2454,725 @@ ARC3_API void arc3_stats(int h, int* out) {
   out[29] = int(a->ge_route.size());
   out[30] = int(a->ge_tried.size());
 }
+// ---- begin autograd.cpp ----
+// ---- begin autograd.h ----
+// ---- end autograd.h ----
+#include <cmath>
+#include <unordered_set>
+#include <cstdint>
+#include <algorithm>
+#include <thread>
+#include <mutex>
+
+namespace ag {
+
+// ---- deterministic RNG (xorshift128+) so runs are reproducible ------------
+// thread_local: each worker thread owns its RNG state, so parallel self-play
+// draws don't race. Reproducibility is kept by seeding per game (seed(...) with
+// a deterministic per-game value) rather than relying on thread scheduling.
+static thread_local uint64_t g_s0 = 0x9E3779B97F4A7C15ull, g_s1 = 0xBF58476D1CE4E5B9ull;
+void seed(uint64_t s) {
+    g_s0 = s ? s : 1;
+    g_s1 = s ^ 0xD1B54A32D192ED03ull;
+}
+static uint64_t next_u64() {
+    uint64_t x = g_s0, y = g_s1;
+    g_s0 = y;
+    x ^= x << 23;
+    g_s1 = x ^ y ^ (x >> 17) ^ (y >> 26);
+    return g_s1 + y;
+}
+float randf() { return (next_u64() >> 11) * (1.0f / 9007199254740992.0f); }
+static float randn_std() {  // Box-Muller
+    float u1 = randf(), u2 = randf();
+    if (u1 < 1e-12f) u1 = 1e-12f;
+    return std::sqrt(-2.f * std::log(u1)) * std::cos(6.2831853f * u2);
+}
+
+// ---- Tensor factories ------------------------------------------------------
+Tensor Tensor::zeros(std::vector<int> shape, bool rg) {
+    auto n = std::make_shared<Node>();
+    n->shape = std::move(shape);
+    n->data.assign(n->numel(), 0.f);
+    n->grad.assign(n->numel(), 0.f);
+    n->requires_grad = rg;
+    n->op = "leaf";
+    return Tensor(n);
+}
+Tensor Tensor::from(std::vector<float> data, std::vector<int> shape, bool rg) {
+    auto t = zeros(std::move(shape), rg);
+    t.n->data = std::move(data);
+    return t;
+}
+Tensor Tensor::randn(std::vector<int> shape, float std, bool rg) {
+    auto t = zeros(std::move(shape), rg);
+    for (auto& v : t.n->data) v = randn_std() * std;
+    return t;
+}
+
+void Tensor::zero_grad() const { std::fill(n->grad.begin(), n->grad.end(), 0.f); }
+
+void Tensor::backward() const {
+    // reverse topological order over the graph rooted at this node
+    std::vector<Node*> topo;
+    std::unordered_set<Node*> seen;
+    std::function<void(Node*)> build = [&](Node* v) {
+        if (seen.count(v)) return;
+        seen.insert(v);
+        for (auto& p : v->parents) build(p.get());
+        topo.push_back(v);
+    };
+    build(n.get());
+
+    n->grad.assign(n->numel(), 0.f);
+    n->grad[0] = 1.0f;  // seed dLoss/dLoss = 1 (expects a scalar root)
+    for (auto it = topo.rbegin(); it != topo.rend(); ++it)
+        if ((*it)->backward_fn) (*it)->backward_fn();
+}
+
+Tensor make_op(std::vector<int> shape, std::vector<NodePtr> parents,
+               const std::string& op) {
+    auto o = std::make_shared<Node>();
+    o->shape = std::move(shape);
+    o->data.assign(o->numel(), 0.f);
+    o->grad.assign(o->numel(), 0.f);
+    o->parents = std::move(parents);
+    o->op = op;
+    for (auto& p : o->parents) o->requires_grad |= p->requires_grad;
+    return Tensor(o);
+}
+
+// ---- elementwise -----------------------------------------------------------
+Tensor add(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "add");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] + b.data()[i];
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            A->grad[i] += O->grad[i];
+            B->grad[i] += O->grad[i];
+        }
+    };
+    return out;
+}
+Tensor sub(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "sub");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] - b.data()[i];
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            A->grad[i] += O->grad[i];
+            B->grad[i] -= O->grad[i];
+        }
+    };
+    return out;
+}
+Tensor mul(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "mul");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] * b.data()[i];
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            A->grad[i] += B->data[i] * O->grad[i];
+            B->grad[i] += A->data[i] * O->grad[i];
+        }
+    };
+    return out;
+}
+Tensor mul_scalar(const Tensor& a, float s) {
+    auto out = make_op(a.shape(), {a.n}, "mul_scalar");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] * s;
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O, s]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) A->grad[i] += s * O->grad[i];
+    };
+    return out;
+}
+Tensor add_scalar(const Tensor& a, float s) {
+    auto out = make_op(a.shape(), {a.n}, "add_scalar");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] + s;
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) A->grad[i] += O->grad[i];
+    };
+    return out;
+}
+Tensor sum(const Tensor& a) {
+    auto out = make_op({1}, {a.n}, "sum");
+    float s = 0;
+    for (int i = 0; i < a.numel(); ++i) s += a.data()[i];
+    out.data()[0] = s;
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < A->grad.size(); ++i) A->grad[i] += O->grad[0];
+    };
+    return out;
+}
+Tensor mean(const Tensor& a) {
+    int n = a.numel();
+    return mul_scalar(sum(a), 1.0f / n);
+}
+
+// ---- matmul ----------------------------------------------------------------
+Tensor matmul(const Tensor& a, const Tensor& b) {
+    int m = a.shape()[0], k = a.shape()[1], n = b.shape()[1];
+    auto out = make_op({m, n}, {a.n, b.n}, "matmul");
+    for (int i = 0; i < m; ++i)
+        for (int j = 0; j < n; ++j) {
+            float s = 0;
+            for (int p = 0; p < k; ++p) s += a.data()[i * k + p] * b.data()[p * n + j];
+            out.data()[i * n + j] = s;
+        }
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O, m, k, n]() {
+        // dA = dO @ B^T ; dB = A^T @ dO
+        for (int i = 0; i < m; ++i)
+            for (int p = 0; p < k; ++p) {
+                float s = 0;
+                for (int j = 0; j < n; ++j) s += O->grad[i * n + j] * B->data[p * n + j];
+                A->grad[i * k + p] += s;
+            }
+        for (int p = 0; p < k; ++p)
+            for (int j = 0; j < n; ++j) {
+                float s = 0;
+                for (int i = 0; i < m; ++i) s += A->data[i * k + p] * O->grad[i * n + j];
+                B->grad[p * n + j] += s;
+            }
+    };
+    return out;
+}
+
+// ---- conv / pooling (NCHW) -------------------------------------------------
+// Cache-friendly GEMM: C(m,n) = A(m,k) * B(k,n). The i-p-j loop order keeps the
+// inner loop contiguous in B and C, which is ~an order of magnitude faster than
+// the naive i-j-p order and lets the compiler auto-vectorize it.
+static void gemm(const float* A, const float* B, float* C, int m, int k, int n,
+                 bool accum) {
+    if (!accum) std::fill(C, C + (size_t)m * n, 0.f);
+    for (int i = 0; i < m; ++i) {
+        const float* Ai = A + (size_t)i * k;
+        float* Ci = C + (size_t)i * n;
+        for (int p = 0; p < k; ++p) {
+            float a = Ai[p];
+            const float* Bp = B + (size_t)p * n;
+            for (int j = 0; j < n; ++j) Ci[j] += a * Bp[j];
+        }
+    }
+}
+
+// im2col: unfold one image's receptive fields into col(K, P),
+// K = C*kh*kw, P = OH*OW. Then conv == W(O,K) @ col(K,P).
+static void im2col(const float* x, int C, int H, int W, int kh, int kw,
+                   int stride, int pad, int OH, int OW, float* col) {
+    int P = OH * OW;
+    for (int c = 0; c < C; ++c)
+      for (int i = 0; i < kh; ++i)
+        for (int j = 0; j < kw; ++j) {
+            float* crow = col + (size_t)((c * kh + i) * kw + j) * P;
+            for (int oh = 0; oh < OH; ++oh) {
+                int ih = oh * stride + i - pad;
+                for (int ow = 0; ow < OW; ++ow) {
+                    int iw = ow * stride + j - pad;
+                    crow[oh * OW + ow] = (ih >= 0 && ih < H && iw >= 0 && iw < W)
+                                             ? x[(c * H + ih) * W + iw] : 0.f;
+                }
+            }
+        }
+}
+
+// col2im: scatter-add columns back into an image gradient (transpose of im2col).
+static void col2im(const float* col, int C, int H, int W, int kh, int kw,
+                   int stride, int pad, int OH, int OW, float* dx) {
+    int P = OH * OW;
+    for (int c = 0; c < C; ++c)
+      for (int i = 0; i < kh; ++i)
+        for (int j = 0; j < kw; ++j) {
+            const float* crow = col + (size_t)((c * kh + i) * kw + j) * P;
+            for (int oh = 0; oh < OH; ++oh) {
+                int ih = oh * stride + i - pad;
+                if (ih < 0 || ih >= H) continue;
+                for (int ow = 0; ow < OW; ++ow) {
+                    int iw = ow * stride + j - pad;
+                    if (iw < 0 || iw >= W) continue;
+                    dx[(c * H + ih) * W + iw] += crow[oh * OW + ow];
+                }
+            }
+        }
+}
+
+// Run body(i) for i in [0,n) across std::thread workers (standard library only).
+// body(i) must touch only data private to index i (plus its own locals).
+static void parallel_for(int n, const std::function<void(int)>& body) {
+    unsigned hw = std::thread::hardware_concurrency();
+    int T = std::max(1, std::min((int)(hw ? hw : 1), n));
+    if (T == 1) { for (int i = 0; i < n; ++i) body(i); return; }
+    std::vector<std::thread> ths;
+    for (int t = 0; t < T; ++t)
+        ths.emplace_back([&, t] { for (int i = t; i < n; i += T) body(i); });
+    for (auto& th : ths) th.join();
+}
+
+Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor& b, int stride, int pad) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    int O = w.shape()[0], kh = w.shape()[2], kw = w.shape()[3];
+    int OH = (H + 2 * pad - kh) / stride + 1;
+    int OW = (W + 2 * pad - kw) / stride + 1;
+    int K = C * kh * kw, P = OH * OW;
+    auto out = make_op({N, O, OH, OW}, {x.n, w.n, b.n}, "conv2d");
+
+    auto& xd = x.data(); auto& wd = w.data(); auto& bd = b.data(); auto& od = out.data();
+    // Forward: images are independent -> parallelize over the batch. Each worker
+    // uses its own im2col buffer and writes only its output slice (no locking).
+    parallel_for(N, [&](int n) {
+        std::vector<float> col((size_t)K * P);
+        im2col(xd.data() + (size_t)n * C * H * W, C, H, W, kh, kw, stride, pad, OH, OW, col.data());
+        float* on = od.data() + (size_t)n * O * P;
+        gemm(wd.data(), col.data(), on, O, K, P, /*accum=*/false);  // (O,K)*(K,P)
+        for (int o = 0; o < O; ++o) {
+            float bo = bd[o], *orow = on + (size_t)o * P;
+            for (int p = 0; p < P; ++p) orow[p] += bo;
+        }
+    });
+
+    Node *X = x.n.get(), *Wt = w.n.get(), *B = b.n.get(), *Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        unsigned hw = std::thread::hardware_concurrency();
+        int T = std::max(1, std::min((int)(hw ? hw : 1), N));
+        std::mutex mtx;
+        // dInput is written per-image (disjoint slices); dW/dBias are accumulated
+        // into thread-local buffers and reduced under a lock at the end.
+        auto worker = [&](int t) {
+            std::vector<float> col((size_t)K * P), dcol((size_t)K * P);
+            std::vector<float> dW((size_t)O * K, 0.f), dB(O, 0.f);
+            for (int n = t; n < N; n += T) {
+                const float* gn = Ot->grad.data() + (size_t)n * O * P;  // dOut (O,P)
+                for (int o = 0; o < O; ++o) {
+                    const float* gr = gn + (size_t)o * P;
+                    float s = 0; for (int p = 0; p < P; ++p) s += gr[p];
+                    dB[o] += s;
+                }
+                im2col(X->data.data() + (size_t)n * C * H * W, C, H, W, kh, kw, stride, pad, OH, OW, col.data());
+                // dW(O,K) += dOut(O,P) . col(K,P)^T
+                for (int o = 0; o < O; ++o) {
+                    const float* gr = gn + (size_t)o * P;
+                    float* dwo = dW.data() + (size_t)o * K;
+                    for (int r = 0; r < K; ++r) {
+                        const float* cr = col.data() + (size_t)r * P;
+                        float s = 0; for (int p = 0; p < P; ++p) s += gr[p] * cr[p];
+                        dwo[r] += s;
+                    }
+                }
+                // dcol(K,P) = W(O,K)^T . dOut(O,P)
+                std::fill(dcol.begin(), dcol.end(), 0.f);
+                for (int o = 0; o < O; ++o) {
+                    const float* wo = Wt->data.data() + (size_t)o * K;
+                    const float* gr = gn + (size_t)o * P;
+                    for (int r = 0; r < K; ++r) {
+                        float wv = wo[r]; float* dr = dcol.data() + (size_t)r * P;
+                        for (int p = 0; p < P; ++p) dr[p] += wv * gr[p];
+                    }
+                }
+                col2im(dcol.data(), C, H, W, kh, kw, stride, pad, OH, OW,
+                       X->grad.data() + (size_t)n * C * H * W);  // disjoint per n
+            }
+            std::lock_guard<std::mutex> lk(mtx);
+            for (size_t i = 0; i < dW.size(); ++i) Wt->grad[i] += dW[i];
+            for (int o = 0; o < O; ++o) B->grad[o] += dB[o];
+        };
+        if (T == 1) { worker(0); return; }
+        std::vector<std::thread> ths;
+        for (int t = 0; t < T; ++t) ths.emplace_back(worker, t);
+        for (auto& th : ths) th.join();
+    };
+    return out;
+}
+
+Tensor maxpool2d(const Tensor& x, int k, int stride, int pad) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    int OH = (H + 2 * pad - k) / stride + 1;
+    int OW = (W + 2 * pad - k) / stride + 1;
+    auto out = make_op({N, C, OH, OW}, {x.n}, "maxpool2d");
+    // remember argmax index (into x) for each output cell to route gradients
+    auto argmax = std::make_shared<std::vector<int>>(out.numel(), -1);
+
+    auto& xd = x.data(); auto& od = out.data();
+    for (int n = 0; n < N; ++n)
+      for (int c = 0; c < C; ++c)
+        for (int oh = 0; oh < OH; ++oh)
+          for (int ow = 0; ow < OW; ++ow) {
+            float best = -1e30f; int bi = -1;
+            for (int i = 0; i < k; ++i)
+              for (int j = 0; j < k; ++j) {
+                  int ih = oh * stride + i - pad, iw = ow * stride + j - pad;
+                  if (ih < 0 || ih >= H || iw < 0 || iw >= W) continue;
+                  int xi = ((n * C + c) * H + ih) * W + iw;
+                  if (xd[xi] > best) { best = xd[xi]; bi = xi; }
+              }
+            int oi = ((n * C + c) * OH + oh) * OW + ow;
+            od[oi] = best; (*argmax)[oi] = bi;
+          }
+
+    Node *X = x.n.get(), *Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        for (size_t oi = 0; oi < Ot->grad.size(); ++oi) {
+            int bi = (*argmax)[oi];
+            if (bi >= 0) X->grad[bi] += Ot->grad[oi];
+        }
+    };
+    return out;
+}
+
+Tensor upsample_nearest2d(const Tensor& x, int scale) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    int OH = H * scale, OW = W * scale;
+    auto out = make_op({N, C, OH, OW}, {x.n}, "upsample");
+    auto& xd = x.data(); auto& od = out.data();
+    for (int n = 0; n < N; ++n)
+      for (int c = 0; c < C; ++c)
+        for (int oh = 0; oh < OH; ++oh)
+          for (int ow = 0; ow < OW; ++ow)
+            od[((n * C + c) * OH + oh) * OW + ow] =
+                xd[((n * C + c) * H + oh / scale) * W + ow / scale];
+    Node *X = x.n.get(), *Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        for (int n = 0; n < N; ++n)
+          for (int c = 0; c < C; ++c)
+            for (int oh = 0; oh < OH; ++oh)
+              for (int ow = 0; ow < OW; ++ow)
+                X->grad[((n * C + c) * H + oh / scale) * W + ow / scale] +=
+                    Ot->grad[((n * C + c) * OH + oh) * OW + ow];
+    };
+    return out;
+}
+
+Tensor batchnorm2d(const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   Tensor& running_mean, Tensor& running_var,
+                   bool training, float momentum, float eps) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    int HW = H * W, M = N * HW;
+    auto out = make_op(x.shape(), {x.n, gamma.n, beta.n}, "batchnorm");
+    auto& xd = x.data(); auto& od = out.data();
+    auto& g = gamma.data(); auto& b = beta.data();
+
+    std::vector<float> mu(C), inv(C);   // per-channel stats used in forward+backward
+    if (training) {
+        for (int c = 0; c < C; ++c) {
+            double s = 0;
+            for (int n = 0; n < N; ++n)
+                for (int i = 0; i < HW; ++i) s += xd[(n * C + c) * HW + i];
+            float m = float(s / M);
+            double v = 0;
+            for (int n = 0; n < N; ++n)
+                for (int i = 0; i < HW; ++i) {
+                    float d = xd[(n * C + c) * HW + i] - m;
+                    v += double(d) * d;
+                }
+            float var = float(v / M);
+            mu[c] = m; inv[c] = 1.f / std::sqrt(var + eps);
+            // update running stats (side effect, no grad)
+            running_mean.data()[c] = (1 - momentum) * running_mean.data()[c] + momentum * m;
+            running_var.data()[c] = (1 - momentum) * running_var.data()[c] + momentum * var;
+        }
+    } else {
+        for (int c = 0; c < C; ++c) {
+            mu[c] = running_mean.data()[c];
+            inv[c] = 1.f / std::sqrt(running_var.data()[c] + eps);
+        }
+    }
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c)
+            for (int i = 0; i < HW; ++i) {
+                int idx = (n * C + c) * HW + i;
+                od[idx] = g[c] * (xd[idx] - mu[c]) * inv[c] + b[c];
+            }
+
+    Node *X = x.n.get(), *G = gamma.n.get(), *B = beta.n.get(), *O = out.n.get();
+    out.n->backward_fn = [=]() {
+        // standard BatchNorm backward (per channel over M elements)
+        for (int c = 0; c < C; ++c) {
+            float sum_dy = 0, sum_dy_xhat = 0;
+            for (int n = 0; n < N; ++n)
+                for (int i = 0; i < HW; ++i) {
+                    int idx = (n * C + c) * HW + i;
+                    float dy = O->grad[idx];
+                    float xhat = (X->data[idx] - mu[c]) * inv[c];
+                    sum_dy += dy;
+                    sum_dy_xhat += dy * xhat;
+                }
+            B->grad[c] += sum_dy;
+            G->grad[c] += sum_dy_xhat;
+            for (int n = 0; n < N; ++n)
+                for (int i = 0; i < HW; ++i) {
+                    int idx = (n * C + c) * HW + i;
+                    float dy = O->grad[idx];
+                    float xhat = (X->data[idx] - mu[c]) * inv[c];
+                    float dxhat = dy * g[c];
+                    // dx = inv/M * (M*dxhat - sum(dxhat) - xhat*sum(dxhat*xhat))
+                    // note sum(dxhat)=g*sum_dy, sum(dxhat*xhat)=g*sum_dy_xhat
+                    X->grad[idx] += inv[c] / M *
+                        (M * dxhat - g[c] * sum_dy - xhat * g[c] * sum_dy_xhat);
+                }
+        }
+    };
+    return out;
+}
+
+Tensor add_bias_nchw(const Tensor& x, const Tensor& b) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    auto out = make_op(x.shape(), {x.n, b.n}, "add_bias");
+    auto& xd = x.data(); auto& bd = b.data(); auto& od = out.data();
+    for (int n = 0; n < N; ++n)
+      for (int c = 0; c < C; ++c)
+        for (int hw = 0; hw < H * W; ++hw)
+          od[(n * C + c) * H * W + hw] = xd[(n * C + c) * H * W + hw] + bd[c];
+    Node *X = x.n.get(), *B = b.n.get(), *Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        for (int n = 0; n < N; ++n)
+          for (int c = 0; c < C; ++c)
+            for (int hw = 0; hw < H * W; ++hw) {
+                float g = Ot->grad[(n * C + c) * H * W + hw];
+                X->grad[(n * C + c) * H * W + hw] += g;
+                B->grad[c] += g;
+            }
+    };
+    return out;
+}
+
+Tensor cat_channels(const std::vector<Tensor>& xs) {
+    int N = xs[0].shape()[0], H = xs[0].shape()[2], W = xs[0].shape()[3];
+    int Ctot = 0;
+    std::vector<NodePtr> parents;
+    for (auto& t : xs) { Ctot += t.shape()[1]; parents.push_back(t.n); }
+    auto out = make_op({N, Ctot, H, W}, parents, "cat");
+    auto& od = out.data();
+    for (int n = 0; n < N; ++n) {
+        int coff = 0;
+        for (auto& t : xs) {
+            int C = t.shape()[1];
+            for (int c = 0; c < C; ++c)
+              for (int hw = 0; hw < H * W; ++hw)
+                od[((n * Ctot) + (coff + c)) * H * W + hw] =
+                    t.data()[(n * C + c) * H * W + hw];
+            coff += C;
+        }
+    }
+    std::vector<Node*> src; for (auto& t : xs) src.push_back(t.n.get());
+    std::vector<int> chans; for (auto& t : xs) chans.push_back(t.shape()[1]);
+    Node* Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        for (int n = 0; n < N; ++n) {
+            int coff = 0;
+            for (size_t s = 0; s < src.size(); ++s) {
+                int C = chans[s];
+                for (int c = 0; c < C; ++c)
+                  for (int hw = 0; hw < H * W; ++hw)
+                    src[s]->grad[(n * C + c) * H * W + hw] +=
+                        Ot->grad[((n * Ctot) + (coff + c)) * H * W + hw];
+                coff += C;
+            }
+        }
+    };
+    return out;
+}
+
+Tensor slice_channels(const Tensor& x, int c0, int c1) {
+    int N = x.shape()[0], C = x.shape()[1], H = x.shape()[2], W = x.shape()[3];
+    int Cs = c1 - c0;
+    auto out = make_op({N, Cs, H, W}, {x.n}, "slice");
+    auto& xd = x.data(); auto& od = out.data();
+    for (int n = 0; n < N; ++n)
+      for (int c = 0; c < Cs; ++c)
+        for (int hw = 0; hw < H * W; ++hw)
+          od[(n * Cs + c) * H * W + hw] = xd[(n * C + (c0 + c)) * H * W + hw];
+    Node *X = x.n.get(), *Ot = out.n.get();
+    out.n->backward_fn = [=]() {
+        for (int n = 0; n < N; ++n)
+          for (int c = 0; c < Cs; ++c)
+            for (int hw = 0; hw < H * W; ++hw)
+              X->grad[(n * C + (c0 + c)) * H * W + hw] +=
+                  Ot->grad[(n * Cs + c) * H * W + hw];
+    };
+    return out;
+}
+
+// ---- elementwise math (used to build CIoU from differentiable pieces) ------
+Tensor maximum(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "maximum");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = std::max(a.data()[i], b.data()[i]);
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i)
+            (A->data[i] >= B->data[i] ? A->grad[i] : B->grad[i]) += O->grad[i];
+    };
+    return out;
+}
+Tensor minimum(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "minimum");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = std::min(a.data()[i], b.data()[i]);
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i)
+            (A->data[i] <= B->data[i] ? A->grad[i] : B->grad[i]) += O->grad[i];
+    };
+    return out;
+}
+Tensor divide(const Tensor& a, const Tensor& b) {
+    auto out = make_op(a.shape(), {a.n, b.n}, "divide");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = a.data()[i] / b.data()[i];
+    Node *A = a.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, B, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            float bv = B->data[i];
+            A->grad[i] += O->grad[i] / bv;
+            B->grad[i] += -O->grad[i] * A->data[i] / (bv * bv);
+        }
+    };
+    return out;
+}
+Tensor sqrt_(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "sqrt");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = std::sqrt(a.data()[i]);
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i)
+            A->grad[i] += O->grad[i] * 0.5f / (O->data[i] + 1e-12f);
+    };
+    return out;
+}
+Tensor atan_(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "atan");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = std::atan(a.data()[i]);
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            float x = A->data[i];
+            A->grad[i] += O->grad[i] / (1 + x * x);
+        }
+    };
+    return out;
+}
+Tensor clamp_min(const Tensor& a, float m) {
+    auto out = make_op(a.shape(), {a.n}, "clamp_min");
+    for (int i = 0; i < out.numel(); ++i) out.data()[i] = std::max(a.data()[i], m);
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O, m]() {
+        for (size_t i = 0; i < O->grad.size(); ++i)
+            if (A->data[i] > m) A->grad[i] += O->grad[i];
+    };
+    return out;
+}
+
+// ---- activations -----------------------------------------------------------
+Tensor relu(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "relu");
+    for (int i = 0; i < a.numel(); ++i) out.data()[i] = a.data()[i] > 0 ? a.data()[i] : 0;
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i)
+            A->grad[i] += (O->data[i] > 0 ? 1.f : 0.f) * O->grad[i];
+    };
+    return out;
+}
+Tensor sigmoid(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "sigmoid");
+    for (int i = 0; i < a.numel(); ++i) out.data()[i] = 1.f / (1.f + std::exp(-a.data()[i]));
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            float s = O->data[i];
+            A->grad[i] += s * (1 - s) * O->grad[i];
+        }
+    };
+    return out;
+}
+Tensor silu(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "silu");
+    for (int i = 0; i < a.numel(); ++i) {
+        float s = 1.f / (1.f + std::exp(-a.data()[i]));
+        out.data()[i] = a.data()[i] * s;
+    }
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            float x = A->data[i];
+            float s = 1.f / (1.f + std::exp(-x));
+            // d/dx (x*sigmoid(x)) = sigmoid + x*sigmoid*(1-sigmoid)
+            A->grad[i] += (s + x * s * (1 - s)) * O->grad[i];
+        }
+    };
+    return out;
+}
+Tensor tanh_(const Tensor& a) {
+    auto out = make_op(a.shape(), {a.n}, "tanh");
+    for (int i = 0; i < a.numel(); ++i) out.data()[i] = std::tanh(a.data()[i]);
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) {
+            float t = O->data[i];
+            A->grad[i] += (1 - t * t) * O->grad[i];   // d/dx tanh = 1 - tanh^2
+        }
+    };
+    return out;
+}
+
+// ---- shape / fully-connected helpers ---------------------------------------
+Tensor reshape(const Tensor& a, std::vector<int> shape) {
+    auto out = make_op(std::move(shape), {a.n}, "reshape");
+    // same number of elements, identical row-major layout -> copy straight over
+    out.data() = a.data();
+    Node *A = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [A, O]() {
+        for (size_t i = 0; i < O->grad.size(); ++i) A->grad[i] += O->grad[i];
+    };
+    return out;
+}
+
+Tensor add_bias_2d(const Tensor& x, const Tensor& b) {
+    int N = x.shape()[0], A = x.shape()[1];
+    auto out = make_op(x.shape(), {x.n, b.n}, "add_bias_2d");
+    for (int n = 0; n < N; ++n)
+        for (int a = 0; a < A; ++a)
+            out.data()[n * A + a] = x.data()[n * A + a] + b.data()[a];
+    Node *X = x.n.get(), *B = b.n.get(), *O = out.n.get();
+    out.n->backward_fn = [X, B, O, N, A]() {
+        for (int n = 0; n < N; ++n)
+            for (int a = 0; a < A; ++a) {
+                float g = O->grad[n * A + a];
+                X->grad[n * A + a] += g;
+                B->grad[a] += g;
+            }
+    };
+    return out;
+}
+
+Tensor log_softmax_rows(const Tensor& a) {
+    int N = a.shape()[0], A = a.shape()[1];
+    auto out = make_op(a.shape(), {a.n}, "log_softmax");
+    // stable: logsumexp per row, out = x - (max + log sum exp(x-max))
+    for (int n = 0; n < N; ++n) {
+        const float* xr = a.data().data() + (size_t)n * A;
+        float m = xr[0];
+        for (int i = 1; i < A; ++i) m = std::max(m, xr[i]);
+        float s = 0; for (int i = 0; i < A; ++i) s += std::exp(xr[i] - m);
+        float lse = m + std::log(s);
+        for (int i = 0; i < A; ++i) out.data()[n * A + i] = xr[i] - lse;
+    }
+    Node *X = a.n.get(), *O = out.n.get();
+    out.n->backward_fn = [X, O, N, A]() {
+        // dx_i = g_i - softmax_i * sum_j g_j ; softmax_i = exp(out_i)
+        for (int n = 0; n < N; ++n) {
+            const float* gr = O->grad.data() + (size_t)n * A;
+            const float* orow = O->data.data() + (size_t)n * A;
+            float gsum = 0; for (int i = 0; i < A; ++i) gsum += gr[i];
+            for (int i = 0; i < A; ++i)
+                X->grad[n * A + i] += gr[i] - std::exp(orow[i]) * gsum;
+        }
+    };
+    return out;
+}
+
+}  // namespace ag
+// ---- end autograd.cpp ----
 """
 
 
@@ -1973,7 +3198,10 @@ def _build_core() -> ctypes.CDLL | None:
         cpp = outdir / f"arc3_core_{tag}_{os.getpid()}.cpp"
         cpp.write_text(src, encoding="utf-8")
         tmp = outdir / f"arc3_core_{tag}_{os.getpid()}.building{ext}"
-        cmd = ["g++", "-O2", "-std=c++17", "-shared"]
+        # -pthread: the autograd engine parallelises convolutions over the
+        # batch with std::thread, and on Linux that needs the flag at both
+        # compile and link time or the threads fail at runtime.
+        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread"]
         if sys.platform != "win32":
             cmd.append("-fPIC")
         cmd += [str(cpp), "-o", str(tmp)]
@@ -2079,9 +3307,11 @@ class MyAgent(Agent):
         if core is not None:
             arr = (ctypes.c_int * len(acts))(*acts)
             self._h = core.arc3_new(arr, len(acts))
-            # 0 directed, 1 sticky-random, 2 mixed, 3 systematic Go-Explore.
-            # Measured on the 25 public games: 0 scores 0.12, the others 0.00.
-            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "0")))
+            # 8 = count, per action and per coordinate, how often it changed the
+            # frame, and sample by the posterior mean. It is the official
+            # sample's idea without the network, and on the 25 public games it
+            # completes 8 levels against 3-4 for every other mode here.
+            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
             core.arc3_set_alphabet(self._h,
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "8")))
