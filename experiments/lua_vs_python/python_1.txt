@@ -1,0 +1,15 @@
+You control an agent in a grid puzzle game. These functions exist and NOTHING else exists:
+
+  find_objects()            -> list of objects, each with fields: x, y, colour, area
+  move_to(x, y)             -> moves the controlled sprite toward (x,y); returns true if it arrived
+  click(x, y)               -> clicks cell (x,y)
+  press(n)                  -> presses button n, where n is 1..5
+  board()                   -> table: w, h, and get(x,y) returning the colour at (x,y)
+  level()                   -> the current level number
+  say(text)                 -> prints text
+
+Write ONLY code, no explanation, no markdown fence.
+
+Task: Click every object whose area is 4 or smaller, smallest first.
+
+Write it in python.
