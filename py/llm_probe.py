@@ -33,6 +33,12 @@ from solve_offline import BY_VALUE, frame_of, quiet
 from view_game import GLYPH, cell_size
 
 MAX_DIFF = 10          # cells listed per action before it is summarised
+MAX_MOVE = 5           # cells an object may travel and still be called the same object
+
+# Without the cap the matcher paired objects across the whole board, and on lf52
+# - where the same 4-cell shape occurs a dozen times - it produced a chain of
+# impossible journeys: one object "moving" to where the next one already was.
+# Nothing that far away is evidence of a move; it is evidence of two objects.
 
 
 def board(frame: np.ndarray, scale: int) -> np.ndarray:
@@ -47,14 +53,8 @@ def changed(before: np.ndarray, after: np.ndarray) -> np.ndarray:
     return before != after
 
 
-def centroids(cells: np.ndarray, limit: int = 6) -> list:
-    """Centroids of the non-background 4-connected regions, rarest colour first.
-
-    The first version of this probe clicked the middle of the board and a
-    quarter of the way in. On ft09 both landed on bare background and the model
-    was asked what the game wants having been shown that nothing does anything.
-    That is not a test of the model.
-    """
+def components(cells: np.ndarray) -> list:
+    """Every non-background 4-connected region as (colour, area, cx, cy)."""
     h, w = cells.shape
     counts = Counter(cells.reshape(-1).tolist())
     bg = {c for c, n in counts.items() if n * 8 > h * w}
@@ -64,7 +64,7 @@ def centroids(cells: np.ndarray, limit: int = 6) -> list:
         for x in range(w):
             if seen[y, x] or int(cells[y, x]) in bg:
                 continue
-            col = cells[y, x]
+            col = int(cells[y, x])
             stack, pts = [(y, x)], []
             seen[y, x] = True
             while stack:
@@ -74,17 +74,72 @@ def centroids(cells: np.ndarray, limit: int = 6) -> list:
                     if 0 <= ny < h and 0 <= nx < w and not seen[ny, nx] and cells[ny, nx] == col:
                         seen[ny, nx] = True
                         stack.append((ny, nx))
-            share = counts[int(col)] / float(h * w)
-            out.append((share, len(pts),
-                        sum(q[1] for q in pts) // len(pts), sum(q[0] for q in pts) // len(pts)))
-    out.sort()
+            out.append((col, len(pts),
+                        sum(q[1] for q in pts) // len(pts),
+                        sum(q[0] for q in pts) // len(pts)))
+    return out
+
+
+def centroids(cells: np.ndarray, limit: int = 6) -> list:
+    """Click targets: one point per object, rarest colour first.
+
+    The first version of this probe clicked the middle of the board and a
+    quarter of the way in. On ft09 both landed on bare background and the model
+    was asked what the game wants having been shown that nothing does anything.
+    That is not a test of the model.
+    """
+    h, w = cells.shape
+    counts = Counter(cells.reshape(-1).tolist())
+    ranked = sorted(components(cells), key=lambda o: (counts[o[0]], o[1]))
     picked = []
-    for _, _, cx, cy in out:
+    for _, _, cx, cy in ranked:
         if all(abs(cx - a) + abs(cy - b) > 2 for a, b in picked):
             picked.append((cx, cy))
         if len(picked) >= limit:
             break
     return picked
+
+
+def object_events(before: np.ndarray, after: np.ndarray, hud: np.ndarray = None) -> str:
+    """Describe a step as things happening to objects, not as cells flipping.
+
+    The cell-level version of this text got a cell-level answer from the model
+    every time: shown two changed cells it said "change (6,9) to F", where the
+    truth is that one sprite walked one square. It was never going to say
+    anything else - the description it was given had no objects in it. So the
+    matching is done here, where the board is, and the model is handed the
+    result instead of the evidence for it.
+    """
+    if hud is not None:
+        after = np.where(hud, before, after)
+    if not (before != after).any():
+        return "nothing happened"
+
+    b, a = components(before), components(after)
+    events, used = [], [False] * len(a)
+    for col, area, cx, cy in b:
+        best, bestd = -1, 1 << 30
+        for i, (c2, a2, x2, y2) in enumerate(a):
+            if used[i] or c2 != col or abs(a2 - area) * 4 > max(area, 1):
+                continue
+            d = abs(x2 - cx) + abs(y2 - cy)
+            if d < bestd and d <= MAX_MOVE:
+                best, bestd = i, d
+        if best < 0:
+            events.append(f"the colour-{GLYPH[col % 16]} object of {area} cells at ({cx},{cy}) disappeared")
+            continue
+        used[best] = True
+        _, a2, x2, y2 = a[best]
+        if (x2, y2) != (cx, cy):
+            events.append(f"the colour-{GLYPH[col % 16]} object of {area} cells moved "
+                          f"({x2 - cx:+d},{y2 - cy:+d}) from ({cx},{cy}) to ({x2},{y2})")
+    for i, (col, area, cx, cy) in enumerate(a):
+        if not used[i] and all(o[:1] != (col,) or (o[2], o[3]) != (cx, cy) for o in b):
+            events.append(f"a colour-{GLYPH[col % 16]} object of {area} cells appeared at ({cx},{cy})")
+    if not events:
+        n = int((before != after).sum())
+        return f"{n} cells changed colour but no object moved, appeared or vanished"
+    return "; ".join(events[:6]) + ("" if len(events) <= 6 else f"; and {len(events) - 6} more")
 
 
 def diff_lines(before: np.ndarray, after: np.ndarray, hud: np.ndarray = None) -> str:
@@ -156,7 +211,7 @@ def probe(game: str) -> str:
         "Effect of each available action, applied once from this board:",
     ]
     for name, after in trials:
-        out.append(f"  {name}: {diff_lines(start, after, hud)}")
+        out.append(f"  {name}: {object_events(start, after, hud)}")
     out += [
         "",
         "Answer in at most three sentences, with no preamble and no restating of",
