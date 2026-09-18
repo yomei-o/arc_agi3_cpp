@@ -359,3 +359,36 @@ tu93 が1ピクセルの点を操作対象にしていた不具合に長く気�
 **既定予算（人間の5倍）で方策を比較しないこと。** 本番はゲームごとに専用スレッドで
 丸ごと時間を使えるので、実効予算は数万手以上。同じ mode 8 が 3,000手で 0.01、
 2万手で 0.41 になる。比較は `--force-budget 20000` で行う。
+
+## llama.cpp（2026-09-18 ビルド完了）
+
+ビルドマシン 192.168.6.14 に CPU専用でビルド済み。手順は `scripts/build_llama.ps1`
+（cmake は vswhere 経由で VS Build Tools の中から見つける）。
+
+```
+C:\prog\llama.cpp\build\bin\Release\llama-cli.exe     version 0.4.1-dev, MSVC 19.44 x64
+C:\prog\llama.cpp\build\bin\Release\llama-server.exe
+```
+
+GPU backend は入れていない。あの箱には RTX 3090 のドライバはあるが CUDA toolkit が無く、
+nvcc が無いので nvcc を要する backend は構成できない。用途が「1手ごと」ではなく
+「1ゲームに数回」の呼び出しなので、CPU で足りるという判断。
+
+### モデルはまだ取っていない。取るときの判断材料
+
+1位(Duck Harness)が使っているのは **`vrfai/Qwen3.6-27B-FP8`**。つまり Qwen で合っているが、
+**FP8 = vLLM 用**であって GGUF ではない。llama.cpp からは同じ重みを読めない。
+
+そして重要な点: その FP8 スナップショットは **Kaggle Dataset として公開されている**
+(`driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot`)。ノートブックが参照している以上、
+こちらも添付できる。だから選択肢は2つある。
+
+| 経路 | 重み | 長所 | 短所 |
+|---|---|---|---|
+| vLLM + 彼らの Dataset | FP8 27B | 1位と同一条件。調達不要 | vLLM が Kaggle イメージにあるか未確認 |
+| llama.cpp + GGUF | 要調達 | 依存が軽い。手元で試せる | 27B Q4 で約16GB、CPUで 2〜4 tok/s |
+
+検証は **Qwen3 8B の GGUF（約5GB）から**始める。確かめたいのは「LLM が盤面を見て
+*このゲームが何を要求しているか* を言い当てられるか」だけで、言い当てられないなら
+27B を用意しても無駄、言い当てられるなら後から差し替えればいい。8B なら手元CPUでも
+10〜20 tok/s 出るので反復が現実的な速さになる。

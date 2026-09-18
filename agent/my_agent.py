@@ -2213,15 +2213,23 @@ uint64_t scene_key(int levels) const {
         cands.push_back(std::make_pair(w, Act(A6, px, py)));
         total += w;
       }
-      for (int y = 1; y < H; y += 4)
-        for (int x = 1; x < W; x += 4) {
-          int cell = (y / 4) * arc3net::COORD_HW + (x / 4);
-          double netp = 1.0 / (1.0 + std::exp(
-              -double(logits.data()[arc3net::N_SIMPLE + cell])));
-          double w = click_weight(y * W + x) * netp;
-          cands.push_back(std::make_pair(w, Act(A6, x, y)));
-          total += w;
-        }
+      // The single biggest change of the day - offering only object centroids
+      // as click targets, worth 0.021 -> 0.38 on the counting policy - lived
+      // only in novelty_sample, which this policy does not go through. So the
+      // blend was still sweeping 256 points of bare board while the counting
+      // policy had stopped. Same switch, same default.
+      if (alpha_grid > 0) {
+        int step = std::max(2, 64 / std::max(1, alpha_grid));
+        for (int y = 1; y < H; y += step)
+          for (int x = 1; x < W; x += step) {
+            int cell = (y / 4) * arc3net::COORD_HW + (x / 4);
+            double netp = 1.0 / (1.0 + std::exp(
+                -double(logits.data()[arc3net::N_SIMPLE + cell])));
+            double w = click_weight(y * W + x) * netp;
+            cands.push_back(std::make_pair(w, Act(A6, x, y)));
+            total += w;
+          }
+      }
     }
     if (cands.empty() || total <= 0.0)
       return emit(avail.empty() ? A1 : avail[rng() % avail.size()], 0, 0);
