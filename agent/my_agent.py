@@ -944,6 +944,7 @@ struct Agent {
   int alpha_objects;   // how many object centroids the search may click
   int alpha_grid;      // plus this many coarse-grid points, for background hits
   int depth_cap;       // how far from the level start the search may wander
+  int forget_mode;     // see the note where it is used
   int budget;          // actions this game allows, for pacing the ensemble
   int phase_mode;      // which policy the ensemble is currently running
   int rollout_len;
@@ -1080,7 +1081,7 @@ struct Agent {
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
         idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
-        budget(4000), phase_mode(0), scene_is_new(false),
+        budget(4000), phase_mode(0), scene_is_new(false), forget_mode(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -1577,13 +1578,24 @@ struct Agent {
     // go inert and then matter again once something else has moved - S5I5's
     // level 1 is A once, B three times, A five times, B four times - so counts
     // that are never forgotten make those games unsolvable by construction.
-    // Reaching an arrangement never seen before halves the evidence: inertness
-    // fades over a few real changes, while a coordinate that keeps paying off
-    // keeps its record.
-    if (scene_is_new && (explore_mode == 8 || explore_mode == 10)) {
+    //
+    // But halving EVERY count on every new arrangement was worse than not
+    // forgetting at all (6 levels and 0.06 against 8 and 0.07): in a movement
+    // game every step of the avatar is a new arrangement, so the evidence was
+    // being halved on essentially every action and never accumulated. Only the
+    // squares that have actually been written off get their second chance; a
+    // square that has ever paid off keeps its record intact.
+    // forget_mode: 0 off, 1 only squares that never paid off, 2 everything.
+    // Measured on all 25 games at 20,000 actions: off gives 8 levels and 0.07,
+    // inert-only gives 4 and 0.01, halve-everything gives 6 and 0.06. Forgetting
+    // is simply wrong here, and it is wrong for a reason worth keeping: in a
+    // movement game every step of the avatar is a new arrangement, so anything
+    // keyed on "a new arrangement appeared" fires on essentially every action.
+    // The switch stays so the claim can be re-checked rather than believed.
+    if (forget_mode && scene_is_new && (explore_mode == 8 || explore_mode == 10)) {
       for (int i = 0; i < NCELL; ++i) {
-        click_tries[i] >>= 1;
-        click_change[i] >>= 1;
+        if (forget_mode == 2) { click_tries[i] >>= 1; click_change[i] >>= 1; }
+        else if (click_change[i] == 0 && click_tries[i] > 0) click_tries[i] >>= 1;
       }
       clicked.clear();
     }
@@ -2301,6 +2313,36 @@ uint64_t scene_key(int levels) const {
       // something again - S5I5's level 1 is two coordinates pressed thirteen
       // times between them. The counting policy alone will drift off it.
       if (has6 && click_live && click_x >= 0) return emit(A6, click_x, click_y);
+
+      // If there is something we control, WALK. Sampling a direction from a
+      // distribution is a terrible way to cross a room: counting alone takes
+      // 12,067 actions to finish level 1 of LS20 against a human baseline of
+      // 22, where routing to rare-coloured objects does it in about 87. Only
+      // completions inside roughly ten times the baseline score at all, so this
+      // is the difference between a level that counts and one that does not.
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (p.empty()) p = plan_to(pickup_targets());
+        if (p.empty()) p = plan_to(rare_targets());
+        if (p.empty()) p = plan_to(frontier_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+        // Standing on something new with an interact key available.
+        if (std::find(avail.begin(), avail.end(), A5) != avail.end() &&
+            !probed5[ay * W + ax]) {
+          probed5[ay * W + ax] = 1;
+          return emit(A5);
+        }
+      }
       if (last_state == 3) return emit(A_RESET, 0, 0);
       if (!calib_queue.empty()) {
         int a = calib_queue.front();
@@ -2755,6 +2797,11 @@ ARC3_API void arc3_set_alphabet(int h, int objects, int grid) {
 ARC3_API void arc3_set_budget(int h, int n) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->budget = n > 0 ? n : 4000;
+}
+
+ARC3_API void arc3_set_forget(int h, int mode) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->forget_mode = mode;
 }
 
 ARC3_API void arc3_set_depth(int h, int cap) {
@@ -3621,6 +3668,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_forget.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
@@ -3688,6 +3736,7 @@ class MyAgent(Agent):
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "8")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
+            core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)
