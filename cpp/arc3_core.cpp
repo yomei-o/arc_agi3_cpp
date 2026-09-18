@@ -565,6 +565,7 @@ struct Agent {
   int forget_mode;     // see the note where it is used
   int trigger_replay;  // see the note where it is used
   int clear_stats_on_level;
+  int balance_families;   // see the note where it is used
   int budget;          // actions this game allows, for pacing the ensemble
   int phase_mode;      // which policy the ensemble is currently running
   int rollout_len;
@@ -702,7 +703,7 @@ struct Agent {
         idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
         budget(4000), phase_mode(0), scene_is_new(false), forget_mode(0),
-        trigger_replay(0), clear_stats_on_level(1),
+        trigger_replay(0), clear_stats_on_level(1), balance_families(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -1599,11 +1600,59 @@ struct Agent {
     }
     if (cands.empty()) return emit(A1, 0, 0);
 
-    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    // balance_families: off by default, because it costs more than it pays.
+    //
+    // The diagnosis behind it is real. Sampling over one flat list lets the MIX
+    // of action types be decided by how many candidates each type happens to
+    // have: five movement keys against forty-eight objects hands clicks nine
+    // tenths of the budget whatever the evidence says. CD82's level-1 solution
+    // is five actions with no click in it, and the agent spent 72% of 2,500
+    // actions clicking.
+    //
+    // Choosing the family first, by the average weight within each rather than
+    // by its size, fixes CD82 exactly as predicted - 43x -> 16x on level 1,
+    // 2179x -> 484x on level 2. It also breaks LF52 (2x -> 40x, 0.53 -> 0.00),
+    // M0R0 (20x -> 80x) and loses AR25 and CN04 outright: 0.408 -> 0.385. A
+    // remedy diagnosed on one game, applied to all of them, for the third time
+    // today. Left behind a switch so the per-game version can be tried later.
+    if (!balance_families) {
+      double r0 = (double(rng() % 1000000) / 1000000.0) * total;
+      for (size_t i = 0; i < cands.size(); ++i) {
+        r0 -= cands[i].first;
+        if (r0 <= 0.0) return emit(cands[i].second.a, cands[i].second.x, cands[i].second.y);
+      }
+      const Act& back = cands.back().second;
+      return emit(back.a, back.x, back.y);
+    }
+
+    double simple_total = 0.0, click_total = 0.0;
+    for (size_t i = 0; i < cands.size(); ++i)
+      (cands[i].second.a == A6 ? click_total : simple_total) += cands[i].first;
+
+    bool want_click;
+    if (simple_total <= 0.0) want_click = true;
+    else if (click_total <= 0.0) want_click = false;
+    else {
+      // Weight each family by its own average, so a family that never does
+      // anything still loses - just not merely for being outnumbered.
+      int ns = 0, nc = 0;
+      for (size_t i = 0; i < cands.size(); ++i)
+        (cands[i].second.a == A6 ? nc : ns) += 1;
+      double s_avg = simple_total / std::max(1, ns);
+      double c_avg = click_total / std::max(1, nc);
+      want_click = (double(rng() % 1000000) / 1000000.0) < c_avg / (s_avg + c_avg);
+    }
+
+    double fam = want_click ? click_total : simple_total;
+    double r = (double(rng() % 1000000) / 1000000.0) * fam;
     for (size_t i = 0; i < cands.size(); ++i) {
+      if ((cands[i].second.a == A6) != want_click) continue;
       r -= cands[i].first;
       if (r <= 0.0) return emit(cands[i].second.a, cands[i].second.x, cands[i].second.y);
     }
+    for (size_t i = cands.size(); i-- > 0;)
+      if ((cands[i].second.a == A6) == want_click)
+        return emit(cands[i].second.a, cands[i].second.x, cands[i].second.y);
     const Act& a = cands.back().second;
     return emit(a.a, a.x, a.y);
   }
@@ -2523,6 +2572,11 @@ ARC3_API void arc3_set_alphabet(int h, int objects, int grid) {
 ARC3_API void arc3_set_budget(int h, int n) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->budget = n > 0 ? n : 4000;
+}
+
+ARC3_API void arc3_set_balance(int h, int on) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->balance_families = on;
 }
 
 ARC3_API void arc3_set_clear_stats(int h, int on) {
