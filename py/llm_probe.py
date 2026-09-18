@@ -233,7 +233,7 @@ def main() -> None:
         games = args.games.split(",")
     else:
         arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
-        games = sorted(arc.list_games())
+        games = sorted({e.game_id.split("-")[0] for e in arc.get_environments()})
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
