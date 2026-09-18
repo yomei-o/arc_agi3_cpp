@@ -127,6 +127,9 @@ struct Adam {
 //   coord  head  conv 32->16 3x3 -> conv 16->1 1x1 -> 16x16 flattened
 // ---------------------------------------------------------------------------
 struct ActionNet {
+  // Used both as the sample's change-predictor and, in DQN mode, as Q(s, .):
+  // the outputs are the same 5 + 16x16 action space either way, only what they
+  // are trained to mean differs.
   ag::Tensor w1, b1_, w2, b2_, w3, b3_;
   ag::Tensor fcw, fcb, outw, outb;
   ag::Tensor cw1, cb1, cw2, cb2;
@@ -154,6 +157,12 @@ struct ActionNet {
     cw1 = kaiming(16, 32, 3);    cb1 = ag::Tensor::zeros({16}, true);
     cw2 = kaiming(1, 16, 1);     cb2 = ag::Tensor::zeros({1}, true);
 
+    opt.attach(params());
+  }
+
+  // Everything the optimiser touches, in a fixed order, so a target network can
+  // be copied across element by element (the trick from mario_dqn_cpp's QNet).
+  std::vector<ag::Tensor> params() {
     std::vector<ag::Tensor> ps;
     ps.push_back(w1); ps.push_back(b1_);
     ps.push_back(w2); ps.push_back(b2_);
@@ -162,7 +171,12 @@ struct ActionNet {
     ps.push_back(outw); ps.push_back(outb);
     ps.push_back(cw1); ps.push_back(cb1);
     ps.push_back(cw2); ps.push_back(cb2);
-    opt.attach(ps);
+    return ps;
+  }
+
+  void copy_from(ActionNet& o) {
+    std::vector<ag::Tensor> a = params(), b = o.params();
+    for (size_t i = 0; i < a.size(); ++i) a[i].data() = b[i].data();
   }
 
   // x: (N, 16, 32, 32) -> (N, N_OUT)

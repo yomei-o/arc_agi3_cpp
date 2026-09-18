@@ -321,6 +321,9 @@ struct Adam {
 //   coord  head  conv 32->16 3x3 -> conv 16->1 1x1 -> 16x16 flattened
 // ---------------------------------------------------------------------------
 struct ActionNet {
+  // Used both as the sample's change-predictor and, in DQN mode, as Q(s, .):
+  // the outputs are the same 5 + 16x16 action space either way, only what they
+  // are trained to mean differs.
   ag::Tensor w1, b1_, w2, b2_, w3, b3_;
   ag::Tensor fcw, fcb, outw, outb;
   ag::Tensor cw1, cb1, cw2, cb2;
@@ -348,6 +351,12 @@ struct ActionNet {
     cw1 = kaiming(16, 32, 3);    cb1 = ag::Tensor::zeros({16}, true);
     cw2 = kaiming(1, 16, 1);     cb2 = ag::Tensor::zeros({1}, true);
 
+    opt.attach(params());
+  }
+
+  // Everything the optimiser touches, in a fixed order, so a target network can
+  // be copied across element by element (the trick from mario_dqn_cpp's QNet).
+  std::vector<ag::Tensor> params() {
     std::vector<ag::Tensor> ps;
     ps.push_back(w1); ps.push_back(b1_);
     ps.push_back(w2); ps.push_back(b2_);
@@ -356,7 +365,12 @@ struct ActionNet {
     ps.push_back(outw); ps.push_back(outb);
     ps.push_back(cw1); ps.push_back(cb1);
     ps.push_back(cw2); ps.push_back(cb2);
-    opt.attach(ps);
+    return ps;
+  }
+
+  void copy_from(ActionNet& o) {
+    std::vector<ag::Tensor> a = params(), b = o.params();
+    for (size_t i = 0; i < a.size(); ++i) a[i].data() = b[i].data();
   }
 
   // x: (N, 16, 32, 32) -> (N, N_OUT)
@@ -982,6 +996,29 @@ struct Agent {
     float reward;
   };
   arc3net::ActionNet net;
+
+  // Mode 11: Double DQN over an intrinsic reward, built the way mario_dqn_cpp
+  // builds one - replay, a target network, and the online net choosing the
+  // argmax while the target net prices it.
+  //
+  // The point is to fix what the sample's predictor cannot express. That CNN
+  // answers "does THIS action change the frame", which is myopic: it cannot
+  // prefer a move that does nothing now but opens something up two steps later.
+  // A discounted Q can. The game's own reward is far too sparse to learn from -
+  // most games never finish a level at all - so the signal is novelty: reaching
+  // an arrangement of objects never seen before pays, repeating one does not.
+  arc3net::ActionNet qtgt;
+  struct Tr {
+    std::array<int8_t, 32 * 32> s, ns;
+    int a;
+    float r;
+    bool done;
+  };
+  std::vector<Tr> qbuf;
+  size_t qhead;
+  int q_sync_every;
+  float q_gamma;
+
   std::vector<Exp> replay;
   std::set<uint64_t> replay_seen;
   std::array<int8_t, 32 * 32> prev_s32;
@@ -1010,6 +1047,7 @@ struct Agent {
   WorldModel wm;
   Scene cur_scene;
   bool have_scene;
+  bool scene_is_new;   // was the arrangement in `cur` one we had not seen?
   std::set<uint64_t> scene_seen;   // arrangements we have actually been in
   int sticky_a, sticky_x, sticky_y;
 
@@ -1042,7 +1080,7 @@ struct Agent {
         bfs_head(0), bfs_phase(0), bfs_replay_pos(0),
         idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
-        budget(4000), phase_mode(0),
+        budget(4000), phase_mode(0), scene_is_new(false),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -1050,6 +1088,9 @@ struct Agent {
     ge_ready = false;
     have_prev_s32 = false;
     prev_action_idx = -1;
+    qhead = 0;
+    q_sync_every = 200;
+    q_gamma = 0.9f;
     train_every = 20;
     train_batch = 16;
     prev_s32.fill(0);
@@ -1321,6 +1362,13 @@ struct Agent {
     ge_route.clear();
     ge_tried.clear();
     ge_ready = false;
+    if (explore_mode == 11) {
+      net.reset();
+      qtgt.copy_from(net);
+      qbuf.clear();
+      qhead = 0;
+      have_prev_s32 = false;
+    }
     if (explore_mode == 9 || explore_mode == 10) {
       // A new level is a different distribution; the sample rebuilds its
       // network here and so do we.
@@ -1452,7 +1500,7 @@ struct Agent {
         wm.learn(cur_scene, ns, last_action);
       cur_scene = ns;
       have_scene = true;
-      scene_seen.insert(cur_scene.hash());
+      scene_is_new = scene_seen.insert(scene_key(levels_completed)).second;
     }
 
     if (explore_mode == 6) {
@@ -1485,6 +1533,21 @@ struct Agent {
       }
     }
 
+    if (explore_mode == 11 && have_prev_s32 && prev_action_idx >= 0) {
+      Tr t;
+      t.s = prev_s32;
+      subsample(cur, t.ns);
+      t.a = prev_action_idx;
+      // Reaching an arrangement never seen before is what we pay for; merely
+      // repainting the picture is worth a little; doing nothing is worth zero.
+      t.r = scene_is_new ? 1.0f : (changed ? 0.2f : 0.0f);
+      if (levels_completed > levels) t.r += 5.0f;
+      t.done = (levels_completed > levels) || last_state == 3;
+      if (qbuf.size() < 20000) qbuf.push_back(t);
+      else { qbuf[qhead] = t; qhead = (qhead + 1) % qbuf.size(); }
+      have_prev_s32 = false;
+    }
+
     if ((explore_mode == 9 || explore_mode == 10) && have_prev_s32 && prev_action_idx >= 0) {
       uint64_t h = exp_hash(prev_s32, prev_action_idx);
       if (replay_seen.insert(h).second) {
@@ -1507,6 +1570,22 @@ struct Agent {
         ++click_tries[last_click_idx];
         if (changed) ++click_change[last_click_idx];
       }
+    }
+
+    // A square that has stopped responding has stopped responding IN THIS
+    // SITUATION. The compressed offline solutions are full of coordinates that
+    // go inert and then matter again once something else has moved - S5I5's
+    // level 1 is A once, B three times, A five times, B four times - so counts
+    // that are never forgotten make those games unsolvable by construction.
+    // Reaching an arrangement never seen before halves the evidence: inertness
+    // fades over a few real changes, while a coordinate that keeps paying off
+    // keeps its record.
+    if (scene_is_new && (explore_mode == 8 || explore_mode == 10)) {
+      for (int i = 0; i < NCELL; ++i) {
+        click_tries[i] >>= 1;
+        click_change[i] >>= 1;
+      }
+      clicked.clear();
     }
 
     if (have_prev) novelty.note_change(prev, cur);
@@ -1771,11 +1850,26 @@ struct Agent {
   // a coordinate that has done nothing four times still worth a third of an
   // untried one, and with a few hundred candidates most of the budget goes to
   // squares that have already proved inert.
-  double click_weight(int idx) const {
+  double click_weight(int idx, double prior = 1.0) const {
     int c = click_change[idx], t = click_tries[idx];
-    if (t == 0) return 0.5;                 // optimistic: try everything once
+    if (t == 0) return 0.5 * prior;         // untried: go on what it looks like
     if (c == 0) return 0.5 / double(1 + t * t);
     return double(c + 1) / double(t + 2);
+  }
+
+  // What a square looks like before anything has been tried there. Across the
+  // 29 level completions the offline solver found, the click that ended a level
+  // landed on a colour covering under 2% of the board with an area of 40 cells
+  // or fewer, every time. Counting alone starts every candidate at the same
+  // 0.5, which throws that away; this is the only place the agent gets to use
+  // it before it has evidence of its own.
+  double click_prior(int colour, int area) const {
+    std::array<int, 32> hist = color_counts();
+    double share = (colour >= 0 && colour < 32) ? double(hist[colour]) / double(NCELL) : 1.0;
+    double w = 1.0;
+    if (share < 0.02) w *= 3.0;
+    if (area > 0 && area <= 40) w *= 2.0;
+    return w;
   }
 
   int novelty_sample(const std::set<int>& bg) {
@@ -1795,7 +1889,8 @@ struct Agent {
       std::vector<Box> comps = components(cur, bg, &cols);
       for (size_t i = 0; i < comps.size() && i < 48; ++i) {
         int idx = comps[i].cy() * W + comps[i].cx();
-        double w = click_weight(idx);
+        int col = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
+        double w = click_weight(idx, click_prior(col, comps[i].area));
         cands.push_back(std::make_pair(w, Act(A6, comps[i].cx(), comps[i].cy())));
         total += w;
       }
@@ -1818,7 +1913,11 @@ struct Agent {
     return emit(a.a, a.x, a.y);
   }
 
-static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
+uint64_t scene_key(int levels) const {
+    return cur_scene.hash() ^ (uint64_t(levels) * 0x9E3779B97F4A7C15ULL);
+  }
+
+  static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
     for (int y = 0; y < 32; ++y)
       for (int x = 0; x < 32; ++x) out[y * 32 + x] = g.c[(y * 2) * W + (x * 2)];
   }
@@ -1950,7 +2049,8 @@ static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
         int cell = (py / 4) * arc3net::COORD_HW + (px / 4);
         double netp = 1.0 / (1.0 + std::exp(
             -double(logits.data()[arc3net::N_SIMPLE + cell])));
-        double w = click_weight(py * W + px) * netp;
+        int col = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
+        double w = click_weight(py * W + px, click_prior(col, comps[i].area)) * netp;
         cands.push_back(std::make_pair(w, Act(A6, px, py)));
         total += w;
       }
@@ -1985,8 +2085,164 @@ static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
     return emit(chosen.a, chosen.x, chosen.y);
   }
 
+  static void widen(const std::array<int8_t, 32 * 32>& s32, std::array<int8_t, NCELL>& full) {
+    for (int y = 0; y < 32; ++y)
+      for (int x = 0; x < 32; ++x) {
+        int8_t v = s32[y * 32 + x];
+        full[(y * 2) * W + (x * 2)] = v;
+        full[(y * 2) * W + (x * 2) + 1] = v;
+        full[(y * 2 + 1) * W + (x * 2)] = v;
+        full[(y * 2 + 1) * W + (x * 2) + 1] = v;
+      }
+  }
+
+  std::vector<float> q_values(const std::array<int8_t, 32 * 32>& s32,
+                              arc3net::ActionNet& which) {
+    std::array<int8_t, NCELL> full;
+    widen(s32, full);
+    std::vector<float> one(arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+    arc3net::encode(full.data(), one.data());
+    ag::Tensor x = ag::Tensor::from(one, {1, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor q = which.forward(x);
+    return q.data();
+  }
+
+  bool q_legal(int idx) const {
+    if (idx < arc3net::N_SIMPLE)
+      return std::find(avail.begin(), avail.end(), A1 + idx) != avail.end();
+    return has6;
+  }
+
+  void q_train() {
+    const int B = 8;   // three forward passes per step, so a smaller batch
+    if (int(qbuf.size()) < B * 2) return;
+
+    std::vector<int> pick(B);
+    for (int i = 0; i < B; ++i) pick[i] = int(rng() % qbuf.size());
+
+    std::array<int8_t, NCELL> full;
+    std::vector<float> xs_next(size_t(B) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW, 0.0f);
+    std::vector<float> xs_cur(size_t(B) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW, 0.0f);
+    for (int b = 0; b < B; ++b) {
+      widen(qbuf[pick[b]].ns, full);
+      arc3net::encode(full.data(),
+                      xs_next.data() + size_t(b) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+      widen(qbuf[pick[b]].s, full);
+      arc3net::encode(full.data(),
+                      xs_cur.data() + size_t(b) * arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+    }
+
+    // Double DQN: the online net says which action is best next, the target net
+    // says what it is worth. One net doing both overestimates.
+    std::vector<float> target(B, 0.0f);
+    {
+      ag::Tensor nx = ag::Tensor::from(xs_next,
+          {B, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+      ag::Tensor q_online = net.forward(nx);
+      ag::Tensor q_target = qtgt.forward(nx);
+      for (int b = 0; b < B; ++b) {
+        float best = 0.0f;
+        int besti = -1;
+        for (int i = 0; i < arc3net::N_OUT; ++i) {
+          if (!q_legal(i)) continue;
+          float v = q_online.data()[size_t(b) * arc3net::N_OUT + i];
+          if (besti < 0 || v > best) { best = v; besti = i; }
+        }
+        float boot = (besti < 0 || qbuf[pick[b]].done)
+                         ? 0.0f
+                         : q_target.data()[size_t(b) * arc3net::N_OUT + besti];
+        target[b] = qbuf[pick[b]].r + q_gamma * boot;
+      }
+    }
+
+    ag::Tensor x = ag::Tensor::from(xs_cur,
+        {B, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor q = net.forward(x);
+    std::vector<float> mask(size_t(B) * arc3net::N_OUT, 0.0f);
+    for (int b = 0; b < B; ++b) mask[size_t(b) * arc3net::N_OUT + qbuf[pick[b]].a] = 1.0f;
+    ag::Tensor m = ag::Tensor::from(mask, {B, arc3net::N_OUT}, false);
+    ag::Tensor ones = ag::Tensor::from(std::vector<float>(arc3net::N_OUT, 1.0f),
+                                       {arc3net::N_OUT, 1}, false);
+    ag::Tensor picked = ag::matmul(ag::mul(q, m), ones);        // (B,1)
+    ag::Tensor tgt = ag::Tensor::from(target, {B, 1}, false);
+    ag::Tensor diff = ag::sub(picked, tgt);
+    ag::Tensor loss = ag::mean(ag::mul(diff, diff));
+
+    net.opt.zero_grad();
+    loss.backward();
+    net.opt.step();
+
+    if (net.opt.t % q_sync_every == 0) qtgt.copy_from(net);
+  }
+
+  // Softmax over the legal Q values. Greedy would stop exploring, and here
+  // exploration IS the reward.
+  int q_choose() {
+    std::array<int8_t, 32 * 32> s32;
+    subsample(cur, s32);
+    std::vector<float> q = q_values(s32, net);
+
+    float best = 0.0f;
+    bool any = false;
+    for (int i = 0; i < arc3net::N_OUT; ++i)
+      if (q_legal(i) && (!any || q[i] > best)) { best = q[i]; any = true; }
+    if (!any) return emit(avail.empty() ? A1 : avail[rng() % avail.size()], 0, 0);
+
+    const float temp = 0.5f;
+    double total = 0.0;
+    std::vector<double> w(arc3net::N_OUT, 0.0);
+    for (int i = 0; i < arc3net::N_OUT; ++i) {
+      if (!q_legal(i)) continue;
+      w[i] = std::exp(double(q[i] - best) / temp);
+      total += w[i];
+    }
+    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    int pick = -1;
+    for (int i = 0; i < arc3net::N_OUT; ++i) {
+      if (w[i] <= 0.0) continue;
+      r -= w[i];
+      if (r <= 0.0) { pick = i; break; }
+    }
+    if (pick < 0) pick = 0;
+
+    prev_s32 = s32;
+    have_prev_s32 = true;
+    prev_action_idx = pick;
+
+    if (pick < arc3net::N_SIMPLE) return emit(A1 + pick, 0, 0);
+    int cell = pick - arc3net::N_SIMPLE;
+    int cx = (cell % arc3net::COORD_HW) * 4 + 2;
+    int cy = (cell / arc3net::COORD_HW) * 4 + 2;
+    return emit(A6, cx, cy);
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    if (explore_mode == 11) {
+      if (last_state == 3) return emit(A_RESET, 0, 0);
+      if (!calib_queue.empty()) {
+        int a = calib_queue.front();
+        calib_queue.erase(calib_queue.begin());
+        return emit(a);
+      }
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      if (steps % 30 == 0) q_train();
+      return q_choose();
+    }
 
     if (explore_mode == 10) {
       if (last_state == 3) return emit(A_RESET, 0, 0);
