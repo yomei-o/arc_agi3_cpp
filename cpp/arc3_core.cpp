@@ -1571,6 +1571,10 @@ struct Agent {
       int a = avail[i];
       if (a == A6) continue;
       double w = (act_change[a] + 1.0) / (act_tries[a] + 2.0);
+      // Symmetric with the click prior: if this is the key that ended the last
+      // level, it is a better guess here than the others. As a weight, not a
+      // branch - which is the distinction that made the click version work.
+      if (trigger_valid && trigger_action == a) w *= 2.0;
       cands.push_back(std::make_pair(w, Act(a, 0, 0)));
       total += w;
     }
