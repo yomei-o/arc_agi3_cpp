@@ -1929,7 +1929,19 @@ struct Agent {
       // too - VC33's second level is finished by clicking empty board.
       std::vector<int> cols;
       std::vector<Box> comps = components(cur, bg, &cols);
-      for (size_t i = 0; i < comps.size() && i < 48; ++i) {
+      // Rank before truncating. The extractor returns objects in scan order, so
+      // taking the first 48 meant that on a board with more than 48 objects the
+      // ones further down were never offered at all - regardless of how rare or
+      // how small they were, which is the only evidence we have about which
+      // ones matter.
+      std::vector<std::pair<double, int> > by_prior;
+      for (size_t i = 0; i < comps.size(); ++i) {
+        int col = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
+        by_prior.push_back(std::make_pair(-click_prior(col, comps[i].area), int(i)));
+      }
+      std::sort(by_prior.begin(), by_prior.end());
+      for (size_t k = 0; k < by_prior.size() && k < 48; ++k) {
+        int i = by_prior[k].second;
         int idx = comps[i].cy() * W + comps[i].cx();
         int col = cols[i] >= 0 && cols[i] < 32 ? cols[i] : 0;
         double w = click_weight(idx, click_prior(col, comps[i].area));
