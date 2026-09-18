@@ -953,7 +953,7 @@ struct Agent {
     ge_route.clear();
     ge_tried.clear();
     ge_ready = false;
-    if (explore_mode == 9) {
+    if (explore_mode == 9 || explore_mode == 10) {
       // A new level is a different distribution; the sample rebuilds its
       // network here and so do we.
       net.reset();
@@ -1117,7 +1117,7 @@ struct Agent {
       }
     }
 
-    if (explore_mode == 9 && have_prev_s32 && prev_action_idx >= 0) {
+    if ((explore_mode == 9 || explore_mode == 10) && have_prev_s32 && prev_action_idx >= 0) {
       uint64_t h = exp_hash(prev_s32, prev_action_idx);
       if (replay_seen.insert(h).second) {
         Exp e;
@@ -1399,6 +1399,17 @@ struct Agent {
 // Sample an action in proportion to how often it has done something. A spot
   // never tried is optimistic (1/2), so everything gets looked at once before
   // anything is written off, and a spot that keeps working keeps being chosen.
+  // Posterior mean, with dead spots pushed down hard. Plain (c+1)/(t+2) leaves
+  // a coordinate that has done nothing four times still worth a third of an
+  // untried one, and with a few hundred candidates most of the budget goes to
+  // squares that have already proved inert.
+  double click_weight(int idx) const {
+    int c = click_change[idx], t = click_tries[idx];
+    if (t == 0) return 0.5;                 // optimistic: try everything once
+    if (c == 0) return 0.5 / double(1 + t * t);
+    return double(c + 1) / double(t + 2);
+  }
+
   int novelty_sample(const std::set<int>& bg) {
     double total = 0.0;
     std::vector<std::pair<double, Act> > cands;
@@ -1416,14 +1427,14 @@ struct Agent {
       std::vector<Box> comps = components(cur, bg, &cols);
       for (size_t i = 0; i < comps.size() && i < 48; ++i) {
         int idx = comps[i].cy() * W + comps[i].cx();
-        double w = (click_change[idx] + 1.0) / (click_tries[idx] + 2.0);
+        double w = click_weight(idx);
         cands.push_back(std::make_pair(w, Act(A6, comps[i].cx(), comps[i].cy())));
         total += w;
       }
       for (int y = 1; y < H; y += 4)
         for (int x = 1; x < W; x += 4) {
           int idx = y * W + x;
-          double w = (click_change[idx] + 1.0) / (click_tries[idx] + 2.0);
+          double w = click_weight(idx);
           cands.push_back(std::make_pair(w, Act(A6, x, y)));
           total += w;
         }
@@ -1531,8 +1542,109 @@ static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
     return emit(A6, cx, cy);
   }
 
+// Mode 10: the counting policy and the network, multiplied.
+  //
+  // At 20,000 actions they reach the same number of levels but not the same
+  // ones - counting gets FT09, VC33 and AR25, the network gets LP85 to level 5,
+  // which is as deep as the offline solver ever managed there. They are good at
+  // different things: counting is useful from the first action and then
+  // saturates, the network knows nothing at first and keeps improving.
+  //
+  // Multiplying the two needs no schedule. An untrained network outputs about
+  // 0.5 everywhere, which is a flat factor and leaves the counts in charge;
+  // as it learns it sharpens and takes over wherever it has an opinion.
+  int blended_choose(const std::set<int>& bg) {
+    std::vector<float> one(arc3net::IN_C * arc3net::IN_HW * arc3net::IN_HW);
+    arc3net::encode(cur.c.data(), one.data());
+    ag::Tensor x = ag::Tensor::from(one, {1, arc3net::IN_C, arc3net::IN_HW, arc3net::IN_HW}, false);
+    ag::Tensor logits = net.forward(x);
+
+    std::vector<std::pair<double, Act> > cands;
+    double total = 0.0;
+
+    for (size_t i = 0; i < avail.size(); ++i) {
+      int a = avail[i];
+      if (a == A6 || a < A1 || a > A5) continue;
+      double table = (act_change[a] + 1.0) / (act_tries[a] + 2.0);
+      double netp = 1.0 / (1.0 + std::exp(-double(logits.data()[a - A1])));
+      double w = table * netp;
+      cands.push_back(std::make_pair(w, Act(a, 0, 0)));
+      total += w;
+    }
+
+    if (has6) {
+      // The network scores one cell per logical square; the table scores exact
+      // pixels. Pair each candidate pixel with the cell it falls in.
+      std::vector<int> cols;
+      std::vector<Box> comps = components(cur, bg, &cols);
+      for (size_t i = 0; i < comps.size() && i < 48; ++i) {
+        int px = comps[i].cx(), py = comps[i].cy();
+        int cell = (py / 4) * arc3net::COORD_HW + (px / 4);
+        double netp = 1.0 / (1.0 + std::exp(
+            -double(logits.data()[arc3net::N_SIMPLE + cell])));
+        double w = click_weight(py * W + px) * netp;
+        cands.push_back(std::make_pair(w, Act(A6, px, py)));
+        total += w;
+      }
+      for (int y = 1; y < H; y += 4)
+        for (int x = 1; x < W; x += 4) {
+          int cell = (y / 4) * arc3net::COORD_HW + (x / 4);
+          double netp = 1.0 / (1.0 + std::exp(
+              -double(logits.data()[arc3net::N_SIMPLE + cell])));
+          double w = click_weight(y * W + x) * netp;
+          cands.push_back(std::make_pair(w, Act(A6, x, y)));
+          total += w;
+        }
+    }
+    if (cands.empty() || total <= 0.0)
+      return emit(avail.empty() ? A1 : avail[rng() % avail.size()], 0, 0);
+
+    double r = (double(rng() % 1000000) / 1000000.0) * total;
+    Act chosen = cands.back().second;
+    for (size_t i = 0; i < cands.size(); ++i) {
+      r -= cands[i].first;
+      if (r <= 0.0) { chosen = cands[i].second; break; }
+    }
+
+    // Remember what was asked of which state, so the network can be told
+    // afterwards whether it was right.
+    subsample(cur, prev_s32);
+    have_prev_s32 = true;
+    prev_action_idx = (chosen.a == A6)
+        ? arc3net::N_SIMPLE + (chosen.y / 4) * arc3net::COORD_HW + (chosen.x / 4)
+        : (chosen.a - A1);
+    if (chosen.a == A6) { click_x = chosen.x; click_y = chosen.y; click_live = false; }
+    return emit(chosen.a, chosen.x, chosen.y);
+  }
+
   int choose() {
     std::set<int> bg = background_colors(cur);
+
+    if (explore_mode == 10) {
+      if (last_state == 3) return emit(A_RESET, 0, 0);
+      if (!calib_queue.empty()) {
+        int a = calib_queue.front();
+        calib_queue.erase(calib_queue.begin());
+        return emit(a);
+      }
+      if (has6 && click_live && click_x >= 0) return emit(A6, click_x, click_y);
+      if (!plan.empty()) {
+        int a = plan.front();
+        plan.erase(plan.begin());
+        return emit(a);
+      }
+      if (avatar_known && ax >= 0) {
+        std::vector<int> p = plan_to(goal_targets());
+        if (!p.empty()) {
+          plan = p;
+          int a = plan.front();
+          plan.erase(plan.begin());
+          return emit(a);
+        }
+      }
+      if (steps % train_every == 0) net_train();
+      return blended_choose(bg);
+    }
 
     if (explore_mode == 9) {
       if (last_state == 3) return emit(A_RESET, 0, 0);
@@ -1561,6 +1673,10 @@ static void subsample(const Grid& g, std::array<int8_t, 32 * 32>& out) {
     }
 
     if (explore_mode == 8) {
+      // A spot that just did something is the best candidate for doing
+      // something again - S5I5's level 1 is two coordinates pressed thirteen
+      // times between them. The counting policy alone will drift off it.
+      if (has6 && click_live && click_x >= 0) return emit(A6, click_x, click_y);
       if (last_state == 3) return emit(A_RESET, 0, 0);
       if (!calib_queue.empty()) {
         int a = calib_queue.front();

@@ -164,10 +164,13 @@ def main() -> None:
     # Build the C++ core once, here, before any workers exist. Letting N
     # processes discover it missing and race to build it means some of them
     # quietly fall back to the Python policy and the run measures a mixture.
+    # Other people's agents (the official sample, for one) have no core at all,
+    # and measuring those against ours is the point of a harness.
     _warm = importlib.util.spec_from_file_location("warm_agent", agent_path)
     _m = importlib.util.module_from_spec(_warm)
     _warm.loader.exec_module(_m)
-    if _m._core() is None:
+    _build = getattr(_m, "_core", None)
+    if _build is not None and _build() is None:
         print("  WARNING: C++ core unavailable; measuring the Python fallback", flush=True)
 
     results = []
