@@ -2035,14 +2035,27 @@ struct Agent {
     if (simple_total <= 0.0) want_click = true;
     else if (click_total <= 0.0) want_click = false;
     else {
-      // Weight each family by its own average, so a family that never does
-      // anything still loses - just not merely for being outnumbered.
-      int ns = 0, nc = 0;
-      for (size_t i = 0; i < cands.size(); ++i)
-        (cands[i].second.a == A6 ? nc : ns) += 1;
-      double s_avg = simple_total / std::max(1, ns);
-      double c_avg = click_total / std::max(1, nc);
-      want_click = (double(rng() % 1000000) / 1000000.0) < c_avg / (s_avg + c_avg);
+      // Choose the family on what it has actually DONE in this game, and on
+      // nothing else.
+      //
+      // The first attempt at this compared the families by their average
+      // candidate weight, which carries the rarity prior - and that prior lifts
+      // objects by up to six times. So it was not comparing evidence with
+      // evidence, and it broke LF52 (2x -> 40x) while fixing CD82. Here the
+      // split is the measured change-rate of each family: how often a movement
+      // key changed the frame against how often any click did. Untried starts
+      // optimistic so both get looked at.
+      long st = 0, sc = 0;
+      for (size_t i = 0; i < avail.size(); ++i) {
+        int a = avail[i];
+        if (a == A6) continue;
+        st += act_tries[a];
+        sc += act_change[a];
+      }
+      long ct = act_tries[A6], cc = act_change[A6];
+      double s_rate = double(sc + 1) / double(st + 2);
+      double c_rate = double(cc + 1) / double(ct + 2);
+      want_click = (double(rng() % 1000000) / 1000000.0) < c_rate / (s_rate + c_rate);
     }
 
     double fam = want_click ? click_total : simple_total;
