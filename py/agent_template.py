@@ -108,6 +108,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_forget.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_trigger.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_clear_stats.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
@@ -182,6 +183,7 @@ class MyAgent(Agent):
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_trigger(self._h, int(os.environ.get("ARC3_TRIGGER", "0")))
+            core.arc3_set_clear_stats(self._h, int(os.environ.get("ARC3_CLEAR", "1")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)

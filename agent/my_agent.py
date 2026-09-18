@@ -946,6 +946,7 @@ struct Agent {
   int depth_cap;       // how far from the level start the search may wander
   int forget_mode;     // see the note where it is used
   int trigger_replay;  // see the note where it is used
+  int clear_stats_on_level;
   int budget;          // actions this game allows, for pacing the ensemble
   int phase_mode;      // which policy the ensemble is currently running
   int rollout_len;
@@ -1083,7 +1084,7 @@ struct Agent {
         idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
         budget(4000), phase_mode(0), scene_is_new(false), forget_mode(0),
-        trigger_replay(0),
+        trigger_replay(0), clear_stats_on_level(1),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -1342,6 +1343,20 @@ struct Agent {
     touched.fill(0);
     clicked.clear();
     plan.clear();
+    // The click statistics were surviving into the next level, where the board
+    // has been replaced wholesale: squares that paid off keep pulling the
+    // sampler back to places that no longer exist, and squares written off in
+    // the old layout stay written off in the new one. Forgetting on every new
+    // arrangement was far too aggressive (it fires on every step of a movement
+    // game); forgetting at a level boundary is the case it was meant for.
+    // Second levels are where this shows: R11L finishes level 1 at 1x the human
+    // baseline and level 2 at 167x.
+    if (clear_stats_on_level) {
+      click_tries.fill(0);
+      click_change.fill(0);
+      act_tries.fill(0);
+      act_change.fill(0);
+    }
     ax = ay = -1;
     expect_valid = false;
     reacquire = int(avail.size()) * 2;
@@ -2892,6 +2907,11 @@ ARC3_API void arc3_set_budget(int h, int n) {
   g_agents[h]->budget = n > 0 ? n : 4000;
 }
 
+ARC3_API void arc3_set_clear_stats(int h, int on) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->clear_stats_on_level = on;
+}
+
 ARC3_API void arc3_set_trigger(int h, int on) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->trigger_replay = on;
@@ -3768,6 +3788,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_forget.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_trigger.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_clear_stats.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
@@ -3842,6 +3863,7 @@ class MyAgent(Agent):
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_trigger(self._h, int(os.environ.get("ARC3_TRIGGER", "0")))
+            core.arc3_set_clear_stats(self._h, int(os.environ.get("ARC3_CLEAR", "1")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)
