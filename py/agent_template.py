@@ -170,9 +170,14 @@ class MyAgent(Agent):
             # sample's idea without the network, and on the 25 public games it
             # completes 8 levels against 3-4 for every other mode here.
             core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
+            # ARC3_ALPHA_GRID=0: offer only object centroids as click targets.
+            # The coarse sweep was 256 candidates against ~48 objects, diluting
+            # the search five to one, and every click that ended a level in the
+            # offline solutions landed on an object. Measured on all 25 games:
+            # no sweep 16 levels / 0.38, sparse 9 / 0.36, dense 8 / 0.02.
             core.arc3_set_alphabet(self._h,
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
-                                   int(os.environ.get("ARC3_ALPHA_GRID", "8")))
+                                   int(os.environ.get("ARC3_ALPHA_GRID", "0")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))

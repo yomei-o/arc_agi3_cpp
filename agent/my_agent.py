@@ -1245,21 +1245,49 @@ struct Agent {
 
   // Squares of rare colours, rarest first - the strongest prior we have for
   // where a level ends when we have not yet seen one end.
-  std::vector<int> rare_targets() {
+  // Rare colours, rarest first.
+  std::vector<int> rare_colours() {
     std::array<int, 32> h = color_counts();
     std::vector<std::pair<int, int> > order;   // (count, colour)
     for (int c = 0; c < 32; ++c)
       if (h[c] > 0 && h[c] < NCELL / 50 && c != av_color) order.push_back(std::make_pair(h[c], c));
     std::sort(order.begin(), order.end());
-    std::vector<int> t;
+    std::vector<int> out;
     for (size_t k = 0; k < order.size(); ++k) {
-      int col = order[k].second;
-      std::map<int, ColorRule>::const_iterator r = rules.find(col);
+      std::map<int, ColorRule>::const_iterator r = rules.find(order[k].second);
       if (r != rules.end() && r->second.is_wall()) continue;
-      for (int i = 0; i < NCELL; ++i)
-        if (cur.c[i] == col && !touched[i]) t.push_back(i);
-      if (!t.empty()) break;    // deal with the rarest colour present first
+      out.push_back(order[k].second);
     }
+    return out;
+  }
+
+  std::vector<int> cells_of(int col) {
+    std::vector<int> t;
+    for (int i = 0; i < NCELL; ++i)
+      if (cur.c[i] == col && !touched[i]) t.push_back(i);
+    return t;
+  }
+
+  // A route to the nearest rare thing we can actually get to.
+  //
+  // This used to take only the single rarest colour and stop. On TU93 the
+  // rarest colour on the board is the remaining-actions bar along the bottom
+  // edge, which no route can reach - so the search returned nothing and the
+  // marker that actually ends the level, the next-rarest colour, was never
+  // tried at all. Rarity is a ranking, not a single answer.
+  std::vector<int> plan_to_rare() {
+    std::vector<int> cols = rare_colours();
+    for (size_t i = 0; i < cols.size(); ++i) {
+      std::vector<int> p = plan_to(cells_of(cols[i]));
+      if (!p.empty()) return p;
+    }
+    return std::vector<int>();
+  }
+
+  std::vector<int> rare_targets() {
+    std::vector<int> cols = rare_colours();
+    std::vector<int> t;
+    for (size_t i = 0; i < cols.size() && t.empty(); ++i) t = cells_of(cols[i]);
     return t;
   }
 
@@ -1906,13 +1934,21 @@ struct Agent {
         cands.push_back(std::make_pair(w, Act(A6, comps[i].cx(), comps[i].cy())));
         total += w;
       }
-      for (int y = 1; y < H; y += 4)
-        for (int x = 1; x < W; x += 4) {
-          int idx = y * W + x;
-          double w = click_weight(idx);
-          cands.push_back(std::make_pair(w, Act(A6, x, y)));
-          total += w;
-        }
+      // The coarse sweep is 256 extra candidates against roughly 48 object
+      // centroids, so it dilutes the search more than five to one - and every
+      // click that ended a level in the offline solutions landed on an object,
+      // not on bare board. alpha_grid controls the stride so the trade can be
+      // measured; 0 turns the sweep off entirely.
+      if (alpha_grid > 0) {
+        int step = std::max(2, 64 / std::max(1, alpha_grid));
+        for (int y = 1; y < H; y += step)
+          for (int x = 1; x < W; x += step) {
+            int idx = y * W + x;
+            double w = click_weight(idx);
+            cands.push_back(std::make_pair(w, Act(A6, x, y)));
+            total += w;
+          }
+      }
     }
     if (cands.empty()) return emit(A1, 0, 0);
 
@@ -2328,7 +2364,7 @@ uint64_t scene_key(int levels) const {
       if (avatar_known && ax >= 0) {
         std::vector<int> p = plan_to(goal_targets());
         if (p.empty()) p = plan_to(pickup_targets());
-        if (p.empty()) p = plan_to(rare_targets());
+        if (p.empty()) p = plan_to_rare();
         if (p.empty()) p = plan_to(frontier_targets());
         if (!p.empty()) {
           plan = p;
@@ -2639,7 +2675,7 @@ uint64_t scene_key(int levels) const {
     if (avatar_known && ax >= 0) {
       std::vector<int> p = plan_to(goal_targets());
       if (p.empty()) p = plan_to(pickup_targets());
-      if (p.empty()) p = plan_to(rare_targets());
+      if (p.empty()) p = plan_to_rare();
       if (!p.empty()) {
         plan = p;
         int a = plan.front();
@@ -3732,9 +3768,14 @@ class MyAgent(Agent):
             # sample's idea without the network, and on the 25 public games it
             # completes 8 levels against 3-4 for every other mode here.
             core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
+            # ARC3_ALPHA_GRID=0: offer only object centroids as click targets.
+            # The coarse sweep was 256 candidates against ~48 objects, diluting
+            # the search five to one, and every click that ended a level in the
+            # offline solutions landed on an object. Measured on all 25 games:
+            # no sweep 16 levels / 0.38, sparse 9 / 0.36, dense 8 / 0.02.
             core.arc3_set_alphabet(self._h,
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
-                                   int(os.environ.get("ARC3_ALPHA_GRID", "8")))
+                                   int(os.environ.get("ARC3_ALPHA_GRID", "0")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
