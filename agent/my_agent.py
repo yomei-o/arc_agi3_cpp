@@ -945,6 +945,7 @@ struct Agent {
   int alpha_grid;      // plus this many coarse-grid points, for background hits
   int depth_cap;       // how far from the level start the search may wander
   int forget_mode;     // see the note where it is used
+  int trigger_replay;  // see the note where it is used
   int budget;          // actions this game allows, for pacing the ensemble
   int phase_mode;      // which policy the ensemble is currently running
   int rollout_len;
@@ -1082,6 +1083,7 @@ struct Agent {
         idd_active(false), idd_try_solution(false), ge_here(0),
         explore_mode(2), alpha_objects(24), alpha_grid(8), depth_cap(12),
         budget(4000), phase_mode(0), scene_is_new(false), forget_mode(0),
+        trigger_replay(0),
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
@@ -2400,6 +2402,49 @@ uint64_t scene_key(int levels) const {
           return emit(a);
         }
       }
+      // Levels of one game share their mechanics, so whatever click finished
+      // the last level is the best guess for this one. Until now mode 8
+      // returned before ever reaching this, so the agent relearned every level
+      // from nothing - and the second levels show it: LP85 6x then 219x, CD82
+      // 11x then 45x.
+      // ...but only for the opening moves of the level. Left unbounded this
+      // branch returns ahead of the counting policy for the whole level and
+      // monopolises it, clicking one lookalike after another: 16 levels and
+      // 0.38 became 13 and 0.35, and it specifically cost the SECOND levels of
+      // R11L, LP85 and VC33. Try what worked, then get out of the way.
+      // trigger_replay: off by default, because it does not work. Measured on
+      // all 25 games at 20,000 actions, replaying the click that finished the
+      // previous level gives 13 levels and 0.35 against 16 and 0.38 without it,
+      // whether it runs for the whole level or only its opening moves. It
+      // specifically costs the SECOND levels of R11L, LP85 and VC33 - the very
+      // thing it was meant to buy - because matching by colour and size picks
+      // one lookalike after another and crowds out the search that was finding
+      // them. The switch stays so the claim can be re-checked.
+      if (trigger_replay && trigger_valid && trigger_kind == TRIG_CLICK && has6 &&
+          int(level_traj.size()) < 12) {
+        std::vector<int> cols;
+        std::vector<Box> comps = components(cur, bg, &cols);
+        int best = -1;
+        double best_d = 1e18;
+        for (size_t i = 0; i < comps.size(); ++i) {
+          int key = comps[i].cy() * W + comps[i].cx();
+          if (clicked.count(key)) continue;
+          double d = (cols[i] == trig_col ? 0.0 : 8.0)
+                   + std::abs(comps[i].area - trig_area) * 2.0
+                   + std::abs(comps[i].w() - trig_w) * 1.0
+                   + std::abs(comps[i].h() - trig_h) * 1.0;
+          if (d < best_d) { best_d = d; best = int(i); }
+        }
+        if (best >= 0) {
+          const Box& b = comps[best];
+          clicked.insert(b.cy() * W + b.cx());
+          click_x = b.cx();
+          click_y = b.cy();
+          click_live = false;
+          return emit(A6, click_x, click_y);
+        }
+      }
+
       return novelty_sample(bg);
     }
 
@@ -2833,6 +2878,11 @@ ARC3_API void arc3_set_alphabet(int h, int objects, int grid) {
 ARC3_API void arc3_set_budget(int h, int n) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->budget = n > 0 ? n : 4000;
+}
+
+ARC3_API void arc3_set_trigger(int h, int on) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->trigger_replay = on;
 }
 
 ARC3_API void arc3_set_forget(int h, int mode) {
@@ -3705,6 +3755,7 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_forget.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_trigger.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_budget.argtypes = [ctypes.c_int, ctypes.c_int]
     return dll
 
@@ -3778,6 +3829,7 @@ class MyAgent(Agent):
                                    int(os.environ.get("ARC3_ALPHA_GRID", "0")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
+            core.arc3_set_trigger(self._h, int(os.environ.get("ARC3_TRIGGER", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
         else:
             from_py = _PyPolicy(acts)
