@@ -193,8 +193,26 @@ def main() -> None:
     for r in results:
         if r.get("error"):
             print(f"  {r['game_id']:6} ERROR: {r['error'].splitlines()[-1][:90]}")
+    # Print what the score is actually made of, not just the score.
+    #
+    # On 2026-09-18 two agents were compared for a whole day on the total alone.
+    # One scored 0.11 and the other 0.46, and the leaderboard then ranked them
+    # the other way round. The reason is visible only here: across 25 games
+    # there are three levels finished near human cost and everything else is
+    # rounding error, so the total is three coin flips wearing a decimal point.
+    # A change that moves one of them is not evidence of anything.
+    eff = sorted(((v, r["game_id"], i + 1)
+                  for r in results for i, v in enumerate(r.get("per_level", [])) if v > 0),
+                 reverse=True)
     print(f"  games={len(results)}  levels={sum(r.get('levels_completed',0) for r in results)}"
           f"  FINAL SCORE = {final:.2f} / 100")
+    strong = [e for e in eff if e[0] >= 0.25]
+    print(f"  人間の手数で解けたレベル(効率>=0.25): {len(strong)}"
+          f"   効率>=0.05: {len([e for e in eff if e[0] >= 0.05])}")
+    for v, g, l in eff[:8]:
+        print(f"    {g} L{l}  効率 {v:.3f}")
+    if len(strong) < 8:
+        print("  注意: 得点イベントがこれだけしか無い。1件の増減を改善と呼んではいけない。")
     if args.out:
         Path(args.out).write_text(json.dumps({"final": final, "results": results}, indent=1))
 
