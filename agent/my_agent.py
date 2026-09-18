@@ -1927,6 +1927,22 @@ struct Agent {
     double w = 1.0;
     if (share < 0.02) w *= 3.0;
     if (area > 0 && area <= 40) w *= 2.0;
+
+    // Something that looks like whatever ended the previous level is a better
+    // guess than something that does not, so it belongs in the prior.
+    //
+    // Putting the same knowledge in a branch that returns early was measured
+    // and it was worse - 16 levels and 0.38 became 13 and 0.35, and it cost
+    // exactly the second levels it was meant to buy, because clicking one
+    // lookalike after another crowded out the search that had been finding
+    // them. Here it competes for probability instead of preempting: a good
+    // guess gets picked sooner, a wrong one is abandoned as soon as the
+    // evidence says so.
+    if (trigger_valid && trigger_kind == TRIG_CLICK && trig_area > 0) {
+      if (colour == trig_col) w *= 2.0;
+      int da = std::abs(area - trig_area);
+      if (da * 4 <= trig_area) w *= 2.0;     // within 25% of the remembered size
+    }
     return w;
   }
 
