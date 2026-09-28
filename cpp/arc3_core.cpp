@@ -2624,6 +2624,8 @@ ARC3_API int arc3_lua_new(const int* actions, int n) {
   arc3lua::Host* hs = new arc3lua::Host();
   const char* wa = std::getenv("ARC3_WALL_AFTER");
   if (wa) hs->wall_after = std::max(1, atoi(wa));
+  const char* ts = std::getenv("ARC3_THINK_SECONDS");
+  if (ts) hs->think_seconds = std::max(1, atoi(ts));
   arc3lua::open_library(*hs);
   for (int i = 0; i < n; ++i) hs->avail.push_back(actions[i]);
   g_lua.push_back(hs);

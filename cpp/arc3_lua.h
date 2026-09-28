@@ -25,6 +25,7 @@ extern "C" {
 #include "lualib.h"
 }
 
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -176,6 +177,10 @@ struct Host {
 
   // move_to state, carried across the yields it makes
   int mv_tx = 0, mv_ty = 0, mv_left = 0;
+
+  // How long one stretch of thinking may take before it counts as a loop.
+  int think_seconds = 5;
+  std::chrono::steady_clock::time_point deadline;
 
   // The tabular policy, available to the script as explore().
   Agent* tab = nullptr;
@@ -701,18 +706,27 @@ enum { LUA_WANTS_ACTION = 1, LUA_DONE = 0, LUA_FAILED = -1 };
 // run produced nothing - and on the competition's machine it would quietly eat
 // the entire eight-hour session. A budget of VM instructions between actions
 // costs nothing and makes that failure a message instead of a hang.
-constexpr int THINK_LIMIT = 20000000;
+// Checked every this many VM instructions; the limit itself is in seconds,
+// because seconds are what the competition charges for and what a person means
+// by "too long". The leading harness gives its Python thirty seconds a call and
+// has to reach for a subprocess to enforce it - a running Python thread cannot
+// be interrupted from outside. Lua puts the hook in the VM, so it is this.
+constexpr int HOOK_EVERY = 200000;
 
 inline void think_too_long(lua_State* L, lua_Debug*) {
-  luaL_error(L, "the script ran for a long time without taking an action - "
-                "it is probably looping; act inside the loop or stop");
+  Host* hs = host_of(L);
+  if (std::chrono::steady_clock::now() < hs->deadline) return;
+  luaL_error(L, "the script ran for %d seconds without taking an action - it is "
+                "probably looping; act inside the loop, or stop", hs->think_seconds);
 }
 
 // Run the policy until it asks for an action, finishes, or breaks.
 inline int resume(Host& hs, int* out_a, int* out_x, int* out_y) {
   if (hs.finished) return hs.error.empty() ? LUA_DONE : LUA_FAILED;
   int nres = 0;
-  lua_sethook(hs.co, think_too_long, LUA_MASKCOUNT, THINK_LIMIT);
+  hs.deadline = std::chrono::steady_clock::now()
+              + std::chrono::seconds(hs.think_seconds);
+  lua_sethook(hs.co, think_too_long, LUA_MASKCOUNT, HOOK_EVERY);
   int rc = lua_resume(hs.co, hs.L, 0, &nres);
   lua_sethook(hs.co, nullptr, 0, 0);
   if (rc == LUA_YIELD) {
