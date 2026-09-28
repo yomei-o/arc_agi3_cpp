@@ -98,7 +98,7 @@ def play_one(lib, game: str, args) -> tuple:
         lib.arc3_lua_state(sess.h, buf, len(buf))
         return buf.value.decode("utf-8", "replace")
 
-    story = ""
+    story, notes = "", []
     for turn in range(1, args.turns + 1):
         prompt = (API + "\nWhat the board looks like now:\n" + briefing() + story +
                   f"\nWrite the next few moves as Lua, at most {args.budget} actions"
@@ -115,18 +115,25 @@ def play_one(lib, game: str, args) -> tuple:
         r = sess.run(script, args.budget)
         gained = sess.levels - before_lv
         print(f"--- turn {turn}: spent={r['spent']} total={sess.used} "
-              f"level={sess.levels}" + ("  LEVEL UP" if gained else ""), flush=True)
+              f"level={sess.levels}"
+              + ("  LEVEL UP" if gained else "")
+              + ("" if r["loaded"] else "  DID NOT COMPILE"), flush=True)
         if r["log"]:
             print(textwrap.indent(r["log"][:600], "    "), flush=True)
 
         if sess.done:
             print("game won", flush=True)
             break
-        story = ("\nYour last script spent " + str(r["spent"]) + " actions. "
-                 + ("It finished a level. " if gained else "No level finished. ")
-                 + "It said:\n" + (r["log"][:800] or "(nothing)") + "\n")
-        if not r["loaded"]:
-            story += ("It did not compile, so none of it ran. Write valid Lua.\n")
+        # Keep a few turns of what it concluded, not just the last one.
+        # With one turn of memory it rediscovered the same wall three times and
+        # spent a third of the game doing it.
+        note = ("\nTurn %d: spent %d actions%s%s. It said:\n%s\n"
+                % (turn, r["spent"],
+                   ", finished a level" if gained else "",
+                   "" if r["loaded"] else ", DID NOT COMPILE - write valid Lua",
+                   r["log"][:600] or "(nothing)"))
+        notes.append(note)
+        story = "".join(notes[-3:])
 
     print(f"\nRESULT game={game} levels={sess.levels} actions={sess.used}",
           flush=True)
