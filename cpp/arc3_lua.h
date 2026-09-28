@@ -272,11 +272,24 @@ inline int first_step_towards(const Host& hs, int tx, int ty) {
       }
       seen[ni] = 1;
       first[ni] = (cur == int(start)) ? it->first : first[size_t(cur)];
-      if (nx == tx && ny == ty) return first[ni];
       q.push_back(int(ni));
     }
   }
-  return 0;
+
+  // The exact square may be unreachable - it is often the target object itself,
+  // which is solid. Walking to the nearest square we can reach is what a person
+  // would do, and refusing to move is what the first version did: the model
+  // asked for three places in a row, was told "no route" three times, and had
+  // nothing left to try.
+  int best = -1, bestd = 1 << 30;
+  for (size_t i = 0; i < n; ++i) {
+    if (!seen[i] || first[i] < 0) continue;
+    int d = std::abs(int(i) % hs.bw - tx) + std::abs(int(i) / hs.bw - ty);
+    if (d < bestd) { bestd = d; best = int(i); }
+  }
+  if (best < 0) return 0;
+  int here = std::abs(me->cx - tx) + std::abs(me->cy - ty);
+  return bestd < here ? first[size_t(best)] : 0;
 }
 
 inline void push_thing(lua_State* L, const Thing& t) {

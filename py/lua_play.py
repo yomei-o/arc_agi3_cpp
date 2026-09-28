@@ -61,14 +61,34 @@ in 500 scores nothing. Spend actions on a hypothesis, not on sweeping.
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--game", default="ka59")
+    ap.add_argument("--game", default="ka59", help="one id, a comma list, or 'all'")
     ap.add_argument("--turns", type=int, default=8)
     ap.add_argument("--budget", type=int, default=120, help="actions per turn")
     ap.add_argument("--keep", default="")
     args = ap.parse_args()
 
     lib = lua_agent.build()
-    sess = lua_agent.Session(lib, args.game)
+    if args.game == "all":
+        lua_agent.quiet()
+        arc = lua_agent.arc_agi.Arcade(operation_mode=lua_agent.OperationMode.NORMAL)
+        games = sorted({e.game_id.split("-")[0] for e in arc.get_environments()})
+    else:
+        games = [g.strip() for g in args.game.split(",")]
+
+    # One game tells you nothing; every wrong remedy this month looked right on
+    # the game it was found on.
+    summary = []
+    for g in games:
+        summary.append(play_one(lib, g, args))
+    if len(summary) > 1:
+        won = [r for r in summary if r[1] > 0]
+        print("\n%d/%d ゲームで1レベル以上: %s"
+              % (len(won), len(summary),
+                 ", ".join("%s(%dlv/%d手)" % (a, b, c) for a, b, c in won)), flush=True)
+
+
+def play_one(lib, game: str, args) -> tuple:
+    sess = lua_agent.Session(lib, game)
 
     buf = ctypes.create_string_buffer(65536)
     lib.arc3_lua_state.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
@@ -108,7 +128,7 @@ def main() -> None:
         if not r["loaded"]:
             story += ("It did not compile, so none of it ran. Write valid Lua.\n")
 
-    print(f"\nRESULT game={args.game} levels={sess.levels} actions={sess.used}",
+    print(f"\nRESULT game={game} levels={sess.levels} actions={sess.used}",
           flush=True)
     sess.close()
 
