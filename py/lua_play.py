@@ -56,6 +56,13 @@ Coordinates are cells, counted from 0. objects() is the truth about positions.
 Your score is (the actions a human needed / the actions you used), squared. A
 level finished in 30 actions where a human took 25 scores well; the same level
 in 500 scores nothing. Spend actions on a hypothesis, not on sweeping.
+
+But you get only a handful of turns, so a script that spends five actions and
+hands back is worse than useless - it burns a turn to learn almost nothing.
+Write a script that keeps going: loop, test a hypothesis, and if it fails, try
+the next one within the same script. When you have no hypothesis at all, call
+explore(200) and look at what moved. Your script should normally spend most of
+the actions it is allowed.
 """
 
 
@@ -101,9 +108,10 @@ def play_one(lib, game: str, args) -> tuple:
     story, notes = "", []
     for turn in range(1, args.turns + 1):
         prompt = (API + "\nWhat the board looks like now:\n" + briefing() + story +
-                  f"\nWrite the next few moves as Lua, at most {args.budget} actions"
-                  " worth. Reply with Lua only: no fence, no prose. Keep it under"
-                  " forty lines - a script cut off in the middle does not run.\n")
+                  f"\nYou have {args.turns - turn + 1} turns left and may spend up"
+                  f" to {args.budget} actions in this one. Write Lua only: no"
+                  " fence, no prose, under forty lines - a script cut off in the"
+                  " middle does not run at all.\n")
         script = ask(prompt, n_predict=1200)
         if args.keep:
             Path(args.keep + f".t{turn}.lua").write_text(script, encoding="utf-8")
