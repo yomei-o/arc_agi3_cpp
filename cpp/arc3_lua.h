@@ -159,6 +159,16 @@ struct Host {
   Grid cur, prev;
   int scale = 1;
   int level = 0, steps = 0, state = 1;
+
+  // What ended the last level, kept in words for the next one.
+  //
+  // This is the whole of the human advantage on these games. The baselines for
+  // lp85 are 17, 38, 31, 16, 41, 60, 26, 159 - level one is where a person
+  // learns the rule and every later level is cheap because they still know it.
+  // The agent threw that away each time a level ended, and paid the first
+  // level's price again and again.
+  std::string won_by;
+  int level_seen = 0;
   std::vector<int> avail;
   std::vector<Thing> cur_things, prev_things;
   std::string log;
@@ -565,6 +575,8 @@ inline int l_reset(lua_State* L) {
 // otherwise have to rediscover by spending actions: which shape it controls,
 // what each button does, which colours have stopped it. Handing this over is
 // the difference between asking the model to play and asking it to guess.
+inline std::string chr10() { return std::string(1, char(10)); }
+
 inline std::string state_text(Host& hs) {
   char buf[256];
   std::string s;
@@ -603,6 +615,19 @@ inline std::string state_text(Host& hs) {
     s += "\n";
   }
 
+  // The picture as well as the list.
+  //
+  // It was taken out because a model shown both counted columns in the ASCII by
+  // hand and argued with the object list. But a plan through a room needs to
+  // know where the walls are, and a list of centroids does not say that. The
+  // list stays authoritative for positions and says so; the picture is there to
+  // be looked at.
+  if (!hs.won_by.empty()) {
+    s += "what ended a level before: " + hs.won_by + chr10();
+  }
+  s += "the board (one character per cell, rulers count from 0):\n";
+  s += board_text(hs.cur, hs.scale);
+  s += "positions above are only a picture; the list below is exact:\n";
   s += "objects now:\n";
   for (size_t k = 0; k < hs.cur_things.size() && k < 40; ++k) {
     const Thing& t = hs.cur_things[k];
@@ -686,6 +711,18 @@ inline void observe(Host& hs, const Grid& g, int level, int state,
   hs.scale = detect_scale(g);
   if (hs.scale < 1) hs.scale = 1;
   hs.cur_things = things_of(g, hs.scale);
+
+  // Notice the moment a level ends, and what ended it.
+  if (level > hs.level_seen) {
+    char b[192];
+    const char* what = "an action";
+    if (hs.last_a == A6) what = "a click";
+    else if (hs.last_a >= A1 && hs.last_a <= A5) what = "a button";
+    std::snprintf(b, sizeof b, "level %d was finished by %s (%d) at step %d",
+                  level, what, hs.last_a, hs.steps);
+    hs.won_by = b;
+    hs.level_seen = level;
+  }
 
   int nw = W / hs.scale, nh = H / hs.scale;
   if (nw != hs.bw || nh != hs.bh) {

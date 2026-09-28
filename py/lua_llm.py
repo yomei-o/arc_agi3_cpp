@@ -121,7 +121,7 @@ def ask_server(prompt: str, n_predict: int) -> str:
         return None
 
 
-def ask(prompt: str, n_predict: int = 1600) -> str:
+def ask(prompt: str, n_predict: int = 1600, raw: bool = False) -> str:
     """One call to the model. Thinking is off; it answers with the script.
 
     The answer is found by subtracting the prompt, not by hunting for where it
@@ -132,7 +132,7 @@ def ask(prompt: str, n_predict: int = 1600) -> str:
     """
     served = ask_server(prompt, n_predict)
     if served is not None:
-        return strip_prose(served)
+        return served if raw else strip_prose(served)
 
     p = Path(os.environ.get("TEMP", ".")) / "lua_llm_prompt.txt"
     p.write_text(prompt, encoding="utf-8")
