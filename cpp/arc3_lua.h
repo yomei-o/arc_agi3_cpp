@@ -169,7 +169,8 @@ struct Host {
   int av_colour = -1, av_area = -1;          // the avatar, once something moved
   std::map<int, Vec> button;                 // button -> the step it takes
   std::vector<uint8_t> blocked;              // logical cells we failed to enter
-  std::set<int> wall_colour;                 // and the colours those cells were
+  std::map<int, int> wall_hits;              // colour -> times it stopped us
+  int wall_after = 1;                        // how many times before we believe it
   int bw = 0, bh = 0;
 
   // move_to state, carried across the yields it makes
@@ -207,13 +208,17 @@ inline void learn(Host& hs) {
     int nx = t.cx + it->second.dx, ny = t.cy + it->second.dy;
     if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) return;
     hs.blocked[size_t(ny) * size_t(hs.bw) + size_t(nx)] = 1;
-    // Generalise from the one cell to its colour.
+    // Generalise from the one cell to its colour - but only after it has
+    // stopped us `wall_after` times.
     //
-    // Remembering only the square we bumped into means walking the length of a
-    // wall and learning it a square at a time, which on ka59 spent eighty
-    // actions to discover four cells of the same barrier. These boards are made
-    // of colours, not of squares: if red stopped us once, red stops us.
-    hs.wall_colour.insert(int(hs.cur.at(nx * hs.scale, ny * hs.scale)));
+    // Remembering only the square we bumped into means learning a wall a square
+    // at a time: on ka59 that was eighty actions to discover four cells of one
+    // barrier. Believing a colour on the strength of a single bump is the
+    // opposite error, and it is the worse one: across all 25 games it made
+    // every route look impossible and the policy gave up inside twenty actions
+    // everywhere. How many bumps it should take is a number, so it is measured
+    // (ARC3_WALL_AFTER) rather than argued about.
+    ++hs.wall_hits[int(hs.cur.at(nx * hs.scale, ny * hs.scale))];
     return;
   }
 }
@@ -255,8 +260,11 @@ inline int first_step_towards(const Host& hs, int tx, int ty) {
       if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) continue;
       size_t ni = size_t(ny) * size_t(hs.bw) + size_t(nx);
       if (seen[ni] || hs.blocked[ni]) continue;
-      if (!(nx == tx && ny == ty) &&
-          hs.wall_colour.count(int(hs.cur.at(nx * hs.scale, ny * hs.scale)))) continue;
+      if (!(nx == tx && ny == ty)) {
+        std::map<int, int>::const_iterator w =
+            hs.wall_hits.find(int(hs.cur.at(nx * hs.scale, ny * hs.scale)));
+        if (w != hs.wall_hits.end() && w->second >= hs.wall_after) continue;
+      }
       seen[ni] = 1;
       first[ni] = (cur == int(start)) ? it->first : first[size_t(cur)];
       if (nx == tx && ny == ty) return first[ni];

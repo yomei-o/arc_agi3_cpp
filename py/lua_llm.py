@@ -52,6 +52,14 @@ These functions exist and NOTHING else does. There is no io, no os, no require.
   click(x, y)    -> click that cell. Returns true if the board changed.
   restart()      -> restart the current level.
 
+  me()           -> the object you control, or nil until something has moved.
+                    Press each button once at the start and it will know.
+  walls()        -> the cells found to be impassable so far.
+  move_to(x, y)  -> walk there by the shortest route known, avoiding walls.
+                    Returns true if it arrived, false if there is no route.
+                    This costs one action per step, and it is the cheapest way
+                    to get anywhere: do not write your own walking loop.
+
 Coordinates are cells, counted from 0. objects() is the truth about what is on
 the board; do not work positions out any other way.
 

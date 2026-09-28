@@ -114,7 +114,8 @@ def play(lib, game: str, script: str, max_actions: int, verbose: bool) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--game", default="ka59")
+    ap.add_argument("--game", default="ka59",
+                    help="one id, a comma list, or 'all' for every public game")
     ap.add_argument("--script", required=True)
     ap.add_argument("--max", type=int, default=2000)
     ap.add_argument("--quiet", action="store_true")
@@ -122,11 +123,32 @@ def main() -> None:
 
     script = Path(args.script).read_text(encoding="utf-8")
     lib = build()
-    r = play(lib, args.game, script, args.max, not args.quiet)
-    if r.get("log"):
-        print(r["log"])
-    print(f"game={r['game']}  levels={r.get('levels', 0)}  actions={r.get('actions', 0)}"
-          + (f"  ERROR {r['error']}" if r.get("error") else ""))
+
+    if args.game == "all":
+        quiet()
+        arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
+        games = sorted({e.game_id.split("-")[0] for e in arc.get_environments()})
+    else:
+        games = [g.strip() for g in args.game.split(",")]
+
+    # One game tells you nothing. Every remedy that was wrong this month looked
+    # right on the game it was found on.
+    rows = []
+    for g in games:
+        try:
+            r = play(lib, g, script, args.max, False)
+        except Exception as e:
+            r = {"game": g, "levels": 0, "actions": 0, "error": f"{type(e).__name__}: {e}"}
+        rows.append(r)
+        if len(games) == 1 and r.get("log"):
+            print(r["log"])
+        print(f"  {g:6} levels={r.get('levels', 0)} actions={r.get('actions', 0)}"
+              + (f"  ERROR {str(r.get('error'))[:70]}" if r.get("error") else ""), flush=True)
+
+    if len(rows) > 1:
+        won = [r for r in rows if r.get("levels", 0) > 0]
+        print(f"\n{len(won)}/{len(rows)} ゲームで1レベル以上: "
+              + ", ".join(f"{r['game']}({r['levels']}lv/{r['actions']}手)" for r in won))
 
 
 if __name__ == "__main__":
