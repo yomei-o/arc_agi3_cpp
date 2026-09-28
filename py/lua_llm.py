@@ -69,10 +69,13 @@ fence, no prose, no apology for what you cannot see.
 You are not told the rules; work them out. A good script presses a button,
 looks at changes(), and decides what to do next - it does not assume. Use say()
 to record what you concluded, so that if it fails I can tell you why.
+
+Keep it under sixty lines. A script that is cut off in the middle does not run
+at all, and three of your last three were.
 """
 
 
-def ask(prompt: str, n_predict: int = 700) -> str:
+def ask(prompt: str, n_predict: int = 1600) -> str:
     """One call to the model. Thinking is off; it answers with the script.
 
     The answer is found by subtracting the prompt, not by hunting for where it
@@ -108,7 +111,16 @@ def ask(prompt: str, n_predict: int = 700) -> str:
         keep.append(line)
     text = "\n".join(keep)
     text = re.sub(r"^```[a-z]*$|^```$", "", text, flags=re.M)
-    return text.strip()
+
+    # Drop whatever prose came before the model started coding. Lua has no
+    # statement that begins with a digit or an article, so a line that does is
+    # not part of the program.
+    start = re.compile(r"^\s*(--|local\b|for\b|while\b|if\b|function\b|repeat\b"
+                       r"|do\b|return\b|[A-Za-z_][A-Za-z_0-9]*\s*[=(])")
+    out = text.splitlines()
+    while out and not start.match(out[0]):
+        out.pop(0)
+    return "\n".join(out).strip()
 
 
 def describe(game: str) -> str:
@@ -124,6 +136,12 @@ def describe(game: str) -> str:
     from llm_probe import probe
     out, skipping = [], False
     for line in probe(game).splitlines():
+        # probe() ends by asking two questions of its own. Leaving them in meant
+        # the prompt carried two requests, and the model answered the one it was
+        # given first: three rounds of "1. The player controls..." and not a
+        # line of Lua. One prompt, one request.
+        if line.startswith("Answer in at most"):
+            break
         if line.startswith("BOARD:"):
             skipping = True
             continue
