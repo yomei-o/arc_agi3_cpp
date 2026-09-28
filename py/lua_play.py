@@ -72,6 +72,7 @@ def main() -> None:
     ap.add_argument("--turns", type=int, default=8)
     ap.add_argument("--budget", type=int, default=120, help="actions per turn")
     ap.add_argument("--keep", default="")
+    ap.add_argument("--jobs", type=int, default=4, help="games to play at once")
     args = ap.parse_args()
 
     lib = lua_agent.build()
@@ -84,9 +85,17 @@ def main() -> None:
 
     # One game tells you nothing; every wrong remedy this month looked right on
     # the game it was found on.
-    summary = []
-    for g in games:
-        summary.append(play_one(lib, g, args))
+    #
+    # The games are independent, and the resident model batches concurrent
+    # requests, so running them together costs almost nothing and turns an hour
+    # into minutes. A day spent changing one prompt at a time is a day of
+    # waiting if each change takes an hour to judge.
+    if len(games) > 1 and args.jobs > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            summary = list(pool.map(lambda g: play_one(lib, g, args), games))
+    else:
+        summary = [play_one(lib, g, args) for g in games]
     if len(summary) > 1:
         won = [r for r in summary if r[1] > 0]
         print("\n%d/%d ゲームで1レベル以上: %s"

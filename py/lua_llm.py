@@ -83,6 +83,34 @@ at all, and three of your last three were.
 """
 
 
+SERVER = os.environ.get("LLAMA_SERVER", "http://127.0.0.1:8080")
+
+
+def ask_server(prompt: str, n_predict: int) -> str:
+    """Ask a resident model. Returns None if there is no server to ask.
+
+    Every call through llama-cli reloads 15.7GB before it says anything, which
+    is ten to fifteen seconds of the roughly forty a call was taking. Sixty-four
+    calls made an eight-game run take an hour, and almost none of that hour was
+    the experiment. With the model resident a call is five to eight seconds.
+    """
+    import json, urllib.request, urllib.error
+    body = json.dumps({
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "temperature": 0.2,
+        "cache_prompt": True,
+        "stop": ["\n\n\n"],
+    }).encode("utf-8")
+    req = urllib.request.Request(SERVER + "/completion", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.load(r).get("content", "")
+    except Exception:
+        return None
+
+
 def ask(prompt: str, n_predict: int = 1600) -> str:
     """One call to the model. Thinking is off; it answers with the script.
 
@@ -92,6 +120,10 @@ def ask(prompt: str, n_predict: int = 1600) -> str:
     separate them; set membership can. The first filter let "Loading model..."
     through and Lua was handed it as a program.
     """
+    served = ask_server(prompt, n_predict)
+    if served is not None:
+        return strip_prose(served)
+
     p = Path(os.environ.get("TEMP", ".")) / "lua_llm_prompt.txt"
     p.write_text(prompt, encoding="utf-8")
     r = subprocess.run(
@@ -117,16 +149,19 @@ def ask(prompt: str, n_predict: int = 1600) -> str:
         if t and any(q.startswith(t) for q in plines):
             continue
         keep.append(line)
-    text = "\n".join(keep)
-    text = re.sub(r"^```[a-z]*$|^```$", "", text, flags=re.M)
+    return strip_prose("\n".join(keep))
 
-    # Drop whatever prose came before the model started coding. Lua has no
-    # statement that begins with a digit or an article, so a line that does is
-    # not part of the program.
-    start = re.compile(r"^\s*(--|local\b|for\b|while\b|if\b|function\b|repeat\b"
-                       r"|do\b|return\b|[A-Za-z_][A-Za-z_0-9]*\s*[=(])")
+
+# Lua has no statement that begins with a digit or an article, so a line that
+# does is prose the model wrote before it started coding.
+_LUA_START = re.compile(r"^\s*(--|local\b|for\b|while\b|if\b|function\b|repeat\b"
+                        r"|do\b|return\b|[A-Za-z_][A-Za-z_0-9]*\s*[=(])")
+
+
+def strip_prose(text: str) -> str:
+    text = re.sub(r"^```[a-z]*$|^```$", "", text, flags=re.M)
     out = text.splitlines()
-    while out and not start.match(out[0]):
+    while out and not _LUA_START.match(out[0]):
         out.pop(0)
     return "\n".join(out).strip()
 

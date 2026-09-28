@@ -31,7 +31,25 @@ _STATE_CODE = {"NOT_PLAYED": 0, "NOT_FINISHED": 1, "WIN": 2, "GAME_OVER": 3}
 
 
 def build() -> ctypes.CDLL:
-    """Compile the core with the Lua layer switched on."""
+    """Compile the core with the Lua layer switched on.
+
+    Keyed by the content of the sources, so an unchanged tree is compiled once
+    and every later run loads it. Ninety seconds a run is not much until it is
+    every run of a day spent changing one prompt at a time.
+    """
+    import hashlib
+    src = [ROOT / "cpp" / "arc3_core.cpp", ROOT / "cpp" / "arc3_lua.h",
+           ROOT / "cpp" / "arc3_net.h", ROOT / "cpp" / "lua_one.cpp",
+           ROOT / "cpp" / "ag" / "autograd.cpp", ROOT / "cpp" / "ag" / "autograd.h"]
+    h = hashlib.sha1()
+    for f in src:
+        if f.exists():
+            h.update(f.read_bytes())
+    tag = h.hexdigest()[:12]
+    cached = Path(tempfile.gettempdir()) / ("arc3lua_%s.dll" % tag)
+    if cached.exists():
+        return _bind(ctypes.CDLL(str(cached)))
+
     out = Path(tempfile.gettempdir()) / ("arc3lua_%d.dll" % os.getpid())
     cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread", "-w",
            "-DARC3_WITH_LUA",
@@ -45,7 +63,15 @@ def build() -> ctypes.CDLL:
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit("build failed:\n" + r.stderr[-4000:])
-    lib = ctypes.CDLL(str(out))
+    try:
+        out.replace(cached)          # publish atomically for the next run
+        out = cached
+    except OSError:
+        pass                         # another process got there first
+    return _bind(ctypes.CDLL(str(out)))
+
+
+def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.arc3_lua_new.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
     lib.arc3_lua_new.restype = ctypes.c_int
     lib.arc3_lua_load.argtypes = [ctypes.c_int, ctypes.c_char_p]
