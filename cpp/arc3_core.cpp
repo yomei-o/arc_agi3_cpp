@@ -2635,10 +2635,10 @@ ARC3_API int arc3_lua_load(int h, const char* script) {
   return arc3lua::start(*g_lua[h], std::string(script)) ? 0 : -1;
 }
 
-ARC3_API void arc3_lua_observe(int h, const int8_t* frame, int level) {
+ARC3_API void arc3_lua_observe(int h, const int8_t* frame, int level, int state) {
   if (h < 0 || h >= int(g_lua.size())) return;
   arc3lua::Host* hs = g_lua[h];
-  arc3lua::observe(*hs, grid_from(frame), level, hs->avail);
+  arc3lua::observe(*hs, grid_from(frame), level, state, hs->avail);
 }
 
 // 1 = it wants the action in *a/*x/*y, 0 = the script finished, -1 = it broke.
@@ -2657,6 +2657,17 @@ ARC3_API int arc3_lua_drain(int h, char* buf, int n) {
   int k = int(out.size());
   if (k > n - 1) k = n - 1;
   std::memcpy(buf, out.data(), size_t(k));
+  buf[k] = 0;
+  return k;
+}
+
+// The between-turns briefing: what the host knows, for the next prompt.
+ARC3_API int arc3_lua_state(int h, char* buf, int n) {
+  if (h < 0 || h >= int(g_lua.size()) || !g_lua[h] || n <= 0) return 0;
+  std::string s = arc3lua::state_text(*g_lua[h]);
+  int k = int(s.size());
+  if (k > n - 1) k = n - 1;
+  std::memcpy(buf, s.data(), size_t(k));
   buf[k] = 0;
   return k;
 }

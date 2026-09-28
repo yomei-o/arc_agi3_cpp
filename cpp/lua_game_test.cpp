@@ -115,7 +115,7 @@ int main() {
   arc3lua::open_library(hs);
 
   std::vector<int> avail = {1, 2, 3, 4, 6};
-  arc3lua::observe(hs, game.frame(), game.level, avail);
+  arc3lua::observe(hs, game.frame(), game.level, 1, avail);
 
   if (!arc3lua::start(hs, POLICY)) {
     std::printf("LOAD FAILED: %s\n", hs.error.c_str());
@@ -135,7 +135,7 @@ int main() {
     }
     if (++guard > 2000) { std::printf("the policy never stopped\n"); return 1; }
     game.step(a, x, y);
-    arc3lua::observe(hs, game.frame(), game.level, avail);
+    arc3lua::observe(hs, game.frame(), game.level, 1, avail);
   }
 
   std::printf("levels=%d  actions=%d\n", game.level, game.actions);

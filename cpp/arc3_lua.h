@@ -156,7 +156,7 @@ struct Host {
 
   Grid cur, prev;
   int scale = 1;
-  int level = 0, steps = 0;
+  int level = 0, steps = 0, state = 1;
   std::vector<int> avail;
   std::vector<Thing> cur_things, prev_things;
   std::string log;
@@ -176,7 +176,11 @@ struct Host {
   // move_to state, carried across the yields it makes
   int mv_tx = 0, mv_ty = 0, mv_left = 0;
 
-  ~Host() { if (L) lua_close(L); }
+  // The tabular policy, available to the script as explore().
+  Agent* tab = nullptr;
+  int tab_left = 0;
+
+  ~Host() { if (L) lua_close(L); delete tab; }
 };
 
 // Learn the two things a walking game never tells you: which shape is you, and
@@ -450,10 +454,108 @@ inline int l_walls(lua_State* L) {
   return 1;
 }
 
+// explore(n) - hand the next n actions to the policy that actually wins.
+//
+// The scripted agent had, at this point, won nothing: neither a policy written
+// by hand nor four written by the model finished a single level of the
+// twenty-five, while the tabular counter policy finishes twelve. Arguing that
+// the script ought to do better is not a plan. Letting it call the thing that
+// works is: the model can then write "explore until something happens, then
+// walk there", which is a strategy neither half can express alone.
+int explore_drive(lua_State* L);
+
+inline int explore_cont(lua_State* L, int, lua_KContext) { return explore_drive(L); }
+
+inline int explore_drive(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->tab_left-- <= 0) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  // The real state code, not a constant. The tabular policy is told the
+  // state and returns RESET itself when that is the only legal action; handed
+  // a hardcoded 1 it never learns the game ended, and every action after the
+  // first GAME_OVER is thrown away. That alone took it from twelve levels to
+  // one.
+  hs->tab->observe(hs->cur.c.data(), hs->level, hs->state);
+  int a = hs->tab->choose();
+  hs->want_a = a;
+  hs->want_x = hs->tab->pending_x;
+  hs->want_y = hs->tab->pending_y;
+  return lua_yieldk(L, 0, 0, explore_cont);
+}
+
+inline int l_explore(lua_State* L) {
+  Host* hs = host_of(L);
+  if (!hs->tab) {
+    hs->tab = new Agent();
+    std::vector<int> av = hs->avail;
+    if (av.empty()) av.push_back(A1);
+    hs->tab->init(av.data(), int(av.size()));
+  }
+  hs->tab_left = int(luaL_optinteger(L, 1, 50));
+  return explore_drive(L);
+}
+
 inline int l_reset(lua_State* L) {
   Host* hs = host_of(L);
   hs->want_a = A_RESET; hs->want_x = 0; hs->want_y = 0;
   return lua_yieldk(L, 0, 0, act_resume);
+}
+
+// What to show the model between turns.
+//
+// Everything here is something the host worked out and the model would
+// otherwise have to rediscover by spending actions: which shape it controls,
+// what each button does, which colours have stopped it. Handing this over is
+// the difference between asking the model to play and asking it to guess.
+inline std::string state_text(Host& hs) {
+  char buf[256];
+  std::string s;
+  std::snprintf(buf, sizeof buf, "level=%d actions_used=%d board=%dx%d\n",
+                hs.level, hs.steps, hs.bw, hs.bh);
+  s += buf;
+
+  const Thing* me = avatar(hs);
+  if (me) {
+    std::snprintf(buf, sizeof buf,
+                  "you control: the '%c' object of %d cells, now at (%d,%d)\n",
+                  glyph_of(me->colour), me->area, me->cx, me->cy);
+    s += buf;
+  } else {
+    s += "you control: not known yet - press each button once and it will be\n";
+  }
+
+  if (!hs.button.empty()) {
+    s += "buttons:";
+    for (std::map<int, Vec>::const_iterator it = hs.button.begin();
+         it != hs.button.end(); ++it) {
+      std::snprintf(buf, sizeof buf, " %d moves you (%+d,%+d)", it->first,
+                    it->second.dx, it->second.dy);
+      s += buf;
+    }
+    s += "\n";
+  }
+
+  if (!hs.wall_hits.empty()) {
+    s += "colours that stopped you:";
+    for (std::map<int, int>::const_iterator it = hs.wall_hits.begin();
+         it != hs.wall_hits.end(); ++it) {
+      std::snprintf(buf, sizeof buf, " '%c' x%d", glyph_of(it->first), it->second);
+      s += buf;
+    }
+    s += "\n";
+  }
+
+  s += "objects now:\n";
+  for (size_t k = 0; k < hs.cur_things.size() && k < 40; ++k) {
+    const Thing& t = hs.cur_things[k];
+    std::snprintf(buf, sizeof buf, "  '%c' area %d at (%d,%d) box %dx%d\n",
+                  glyph_of(t.colour), t.area, t.cx, t.cy, t.w, t.h);
+    s += buf;
+  }
+  if (hs.cur_things.size() > 40) s += "  ...\n";
+  return s;
 }
 
 // --- the state -------------------------------------------------------------
@@ -505,6 +607,7 @@ inline void open_library(Host& hs) {
     {"press",      l_press},
     {"click",      l_click},
     {"move_to",    l_move_to},
+    {"explore",    l_explore},
     {"me",         l_me},
     {"walls",      l_walls},
     {"restart",    l_reset},
@@ -516,11 +619,13 @@ inline void open_library(Host& hs) {
   }
 }
 
-inline void observe(Host& hs, const Grid& g, int level, const std::vector<int>& avail) {
+inline void observe(Host& hs, const Grid& g, int level, int state,
+                    const std::vector<int>& avail) {
   hs.prev = hs.cur;
   hs.prev_things = hs.cur_things;
   hs.cur = g;
   hs.level = level;
+  hs.state = state;
   hs.avail = avail;
   hs.scale = detect_scale(g);
   if (hs.scale < 1) hs.scale = 1;
@@ -536,6 +641,12 @@ inline void observe(Host& hs, const Grid& g, int level, const std::vector<int>& 
 
 // Load the policy. Returns false and fills hs.error if it does not compile.
 inline bool start(Host& hs, const std::string& script) {
+  // A second call replaces the script but keeps everything the host has
+  // learned: the avatar, the buttons, the walls, the tabular policy's counters.
+  // That is the point of loading more than once - the model gets to see a few
+  // moves and write the next few, without the agent forgetting the game.
+  hs.finished = false;
+  hs.error.clear();
   hs.co = lua_newthread(hs.L);
   lua_setfield(hs.L, LUA_REGISTRYINDEX, "arc3.co");   // anchor against the GC
   if (luaL_loadbuffer(hs.co, script.data(), script.size(), "policy") != LUA_OK) {

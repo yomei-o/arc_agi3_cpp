@@ -50,7 +50,8 @@ def build() -> ctypes.CDLL:
     lib.arc3_lua_new.restype = ctypes.c_int
     lib.arc3_lua_load.argtypes = [ctypes.c_int, ctypes.c_char_p]
     lib.arc3_lua_load.restype = ctypes.c_int
-    lib.arc3_lua_observe.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int8), ctypes.c_int]
+    lib.arc3_lua_observe.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int8),
+                                     ctypes.c_int, ctypes.c_int]
     lib.arc3_lua_step.argtypes = [ctypes.c_int] + [ctypes.POINTER(ctypes.c_int)] * 3
     lib.arc3_lua_step.restype = ctypes.c_int
     lib.arc3_lua_drain.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
@@ -62,6 +63,74 @@ def drain(lib, h) -> str:
     buf = ctypes.create_string_buffer(65536)
     n = lib.arc3_lua_drain(h, buf, len(buf))
     return buf.value.decode("utf-8", "replace") if n else ""
+
+
+class Session:
+    """One game, one host, many scripts.
+
+    The model cannot write a policy for a game it has not seen played. So the
+    game and everything the host has learned about it - the avatar, the buttons,
+    the walls, the tabular policy's counters - outlive any one script, and the
+    model writes a few moves at a time with the board in front of it.
+    """
+
+    def __init__(self, lib, game: str):
+        quiet()
+        self.lib = lib
+        self.game = game
+        self.arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
+        self.env = self.arc.make(game)
+        self.obs = self.env.step(GameAction.RESET)
+        self.avail = [a.value if hasattr(a, "value") else int(a)
+                      for a in self.obs.available_actions]
+        arr = (ctypes.c_int * len(self.avail))(*self.avail)
+        self.h = lib.arc3_lua_new(arr, len(self.avail))
+        self.used = 0
+        self.done = False
+        self._observe()
+
+    def _observe(self):
+        f = frame_of(self.obs)
+        if f is None:
+            return
+        flat = np.ascontiguousarray(np.asarray(f, dtype=np.int8).reshape(-1))
+        st = _STATE_CODE.get(getattr(self.obs.state, "value", str(self.obs.state)), 1)
+        self.lib.arc3_lua_observe(
+            self.h, flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int8)),
+            int(self.obs.levels_completed), st)
+
+    @property
+    def levels(self) -> int:
+        return int(self.obs.levels_completed)
+
+    def run(self, script: str, budget: int) -> dict:
+        """Load a script and let it spend at most `budget` actions."""
+        if self.lib.arc3_lua_load(self.h, script.encode("utf-8")) != 0:
+            return {"spent": 0, "log": drain(self.lib, self.h).strip(), "loaded": False}
+        a, x, y = (ctypes.c_int(0) for _ in range(3))
+        spent = 0
+        while spent < budget:
+            rc = self.lib.arc3_lua_step(self.h, ctypes.byref(a), ctypes.byref(x),
+                                        ctypes.byref(y))
+            if rc != 1:
+                break
+            spent += 1
+            self.used += 1
+            data = {"x": x.value, "y": y.value} if a.value == 6 else {}
+            try:
+                self.obs = self.env.step(BY_VALUE[a.value], data=data)
+            except Exception as e:
+                return {"spent": spent, "log": f"the game raised {type(e).__name__}: {e}",
+                        "loaded": True}
+            self._observe()
+            st = _STATE_CODE.get(getattr(self.obs.state, "value", str(self.obs.state)), 1)
+            if st == 2:
+                self.done = True
+                break
+        return {"spent": spent, "log": drain(self.lib, self.h).strip(), "loaded": True}
+
+    def close(self):
+        self.lib.arc3_lua_free(self.h)
 
 
 def play(lib, game: str, script: str, max_actions: int, verbose: bool) -> dict:
@@ -81,8 +150,9 @@ def play(lib, game: str, script: str, max_actions: int, verbose: bool) -> dict:
         if f is None:
             return
         flat = np.ascontiguousarray(np.asarray(f, dtype=np.int8).reshape(-1))
+        st = _STATE_CODE.get(getattr(o.state, "value", str(o.state)), 1)
         lib.arc3_lua_observe(h, flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int8)),
-                             int(o.levels_completed))
+                             int(o.levels_completed), st)
 
     observe(obs)
     a, x, y = (ctypes.c_int(0) for _ in range(3))
