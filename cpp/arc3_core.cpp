@@ -2587,6 +2587,69 @@ std::vector<Agent*> g_agents;
 
 }  // namespace
 
+#ifdef ARC3_WITH_LUA
+#include "arc3_lua.h"
+
+namespace {
+std::vector<arc3lua::Host*> g_lua;
+Grid grid_from(const int8_t* frame) {
+  Grid g;
+  for (int i = 0; i < NCELL; ++i) g.c[i] = frame[i];
+  return g;
+}
+}  // namespace
+
+// A second agent, driven by a script instead of by counters.
+//
+// It is deliberately a separate handle space. The tabular policy is what gets
+// submitted and it must not gain a Lua dependency; this one is what the LLM
+// writes for, and the two are measured against each other rather than merged.
+ARC3_API int arc3_lua_new(const int* actions, int n) {
+  arc3lua::Host* hs = new arc3lua::Host();
+  arc3lua::open_library(*hs);
+  for (int i = 0; i < n; ++i) hs->avail.push_back(actions[i]);
+  g_lua.push_back(hs);
+  return int(g_lua.size()) - 1;
+}
+
+ARC3_API int arc3_lua_load(int h, const char* script) {
+  if (h < 0 || h >= int(g_lua.size())) return -1;
+  return arc3lua::start(*g_lua[h], std::string(script)) ? 0 : -1;
+}
+
+ARC3_API void arc3_lua_observe(int h, const int8_t* frame, int level) {
+  if (h < 0 || h >= int(g_lua.size())) return;
+  arc3lua::Host* hs = g_lua[h];
+  arc3lua::observe(*hs, grid_from(frame), level, hs->avail);
+}
+
+// 1 = it wants the action in *a/*x/*y, 0 = the script finished, -1 = it broke.
+ARC3_API int arc3_lua_step(int h, int* a, int* x, int* y) {
+  if (h < 0 || h >= int(g_lua.size())) return -1;
+  return arc3lua::resume(*g_lua[h], a, x, y);
+}
+
+// Drain say() output and any error text; both are copied out and cleared.
+ARC3_API int arc3_lua_drain(int h, char* buf, int n) {
+  if (h < 0 || h >= int(g_lua.size()) || n <= 0) return 0;
+  arc3lua::Host* hs = g_lua[h];
+  std::string out = hs->log;
+  if (!hs->error.empty()) out += "ERROR: " + hs->error + std::string(1, char(10));
+  hs->log.clear();
+  int k = int(out.size());
+  if (k > n - 1) k = n - 1;
+  std::memcpy(buf, out.data(), size_t(k));
+  buf[k] = 0;
+  return k;
+}
+
+ARC3_API void arc3_lua_free(int h) {
+  if (h < 0 || h >= int(g_lua.size()) || !g_lua[h]) return;
+  delete g_lua[h];
+  g_lua[h] = nullptr;
+}
+#endif  // ARC3_WITH_LUA
+
 ARC3_API int arc3_new(const int* actions, int n) {
   Agent* a = new Agent();
   a->init(actions, n);
