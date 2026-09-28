@@ -390,40 +390,40 @@ struct ArcEntry {
 // single-pixel specks: on TU93 it adopted a 1x1 dot of colour 4 as the avatar
 // while the actual player, a 3x3 block of colour 9, went untracked.
 int detect_scale(const Grid& g) {
-  std::array<int, 9> hits;
-  hits.fill(0);
-  int edges = 0;
+  // A direct port of view_game.py's cell_size, because that one is right and
+  // this one was not: on 15 of the 25 public games the two disagreed, and the
+  // C++ answer was usually 1. That is not a detail. At scale 1 the board shown
+  // to the model is 64x64 pixels instead of 32x32 cells, every object's area is
+  // four times too big, and one press of a button moves the avatar two "cells".
+  // Every coordinate the agent reasons about, and every coordinate it puts in a
+  // prompt, is in a unit no action can take.
+  //
+  // Two things differ from the version this replaces. Edge POSITIONS are
+  // collected into a set, so a boundary running down a whole column counts once
+  // and not sixty-four times; and the scale is chosen by walking down from 8 and
+  // taking each smaller size that explains at least 5% more edges, which lands
+  // on the true cell size rather than on its largest divisor.
+  std::vector<uint8_t> edge(std::max(W, H) + 1, 0);
   for (int y = 0; y < H; ++y)
     for (int x = 1; x < W; ++x)
-      if (g.c[y * W + x] != g.c[y * W + x - 1]) {
-        ++edges;
-        for (int s = 2; s <= 8; ++s) if (x % s == 0) ++hits[s];
-      }
+      if (g.c[y * W + x] != g.c[y * W + x - 1]) edge[x] = 1;
   for (int x = 0; x < W; ++x)
     for (int y = 1; y < H; ++y)
-      if (g.c[y * W + x] != g.c[(y - 1) * W + x]) {
-        ++edges;
-        for (int s = 2; s <= 8; ++s) if (y % s == 0) ++hits[s];
-      }
-  if (edges < 16) return 1;
+      if (g.c[y * W + x] != g.c[(y - 1) * W + x]) edge[y] = 1;
 
-  // Take the largest scale that explains nearly as many edges as the best one
-  // does, rather than demanding an absolute 90%.
-  //
-  // The absolute rule returned 1 on ka59, whose cells are 3 pixels across: the
-  // board carries furniture - a step counter, a border - whose edges do not sit
-  // on the cell grid, and a handful of them is enough to push every candidate
-  // under the bar. Returning 1 is not a small error. It makes one button press
-  // move the avatar three "cells", so every coordinate the agent reasons about
-  // and every coordinate it puts in a prompt is in units no action can take.
-  // The Python viewer has used the relative rule all along and reads ka59
-  // correctly; this is the same rule.
-  int best = 0;
-  for (int s = 2; s <= 8; ++s) best = std::max(best, hits[s]);
-  if (best * 2 < edges) return 1;              // nothing looks like a grid
-  for (int s = 8; s >= 2; --s)
-    if (hits[s] * 100 >= best * 95) return s;
-  return 1;
+  int total = 0;
+  for (size_t i = 0; i < edge.size(); ++i) total += edge[i];
+  if (total == 0) return 1;
+
+  int best = 1;
+  double best_hits = -1.0;
+  for (int s = 8; s >= 2; --s) {
+    int hits = 0;
+    for (size_t e = 0; e < edge.size(); ++e)
+      if (edge[e] && int(e) % s == 0) ++hits;
+    if (hits > best_hits * 1.05) { best = s; best_hits = hits; }
+  }
+  return best;
 }
 
 // A translation of one colour between two frames.

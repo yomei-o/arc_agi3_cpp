@@ -117,7 +117,18 @@ def ask_server(prompt: str, n_predict: int) -> str:
         with urllib.request.urlopen(req, timeout=300) as r:
             d = json.load(r)
         return d["choices"][0]["message"]["content"]
-    except Exception:
+    except Exception as e:
+        # Say so. The first version failed silently and fell back to llama-cli,
+        # which cannot have the card (the server is holding it) and so crawls on
+        # the processor. Four of them at once turned a three-minute run into a
+        # stall with no message anywhere. A slow path that hides itself is worse
+        # than no slow path.
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = str(e)[:300]
+        sys.stderr.write("llama-server call failed: " + detail + "\n")
         return None
 
 
