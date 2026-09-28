@@ -31,7 +31,10 @@ extern "C" {
 #include <string>
 #include <vector>
 
+#include "arc3_shapes.h"
+
 namespace arc3lua {
+
 
 // The glyph table is the one view_game.py prints, so a board in a prompt and a
 // board in a log are the same text. Nothing about the model depends on it, but
@@ -169,6 +172,15 @@ struct Host {
   // level's price again and again.
   std::string won_by;
   int level_seen = 0;
+
+  // The actions of the level being played, and of the one before it.
+  //
+  // A person who has just worked out lp85's first level does not work it out
+  // again for the second: the baselines are 17, 38, 31, 16, 41, 60, 26, 159 and
+  // the later ones are cheap because the rule is known. The agent threw this
+  // away every time a level ended and paid the first level's price again.
+  std::vector<Act> this_level, last_level;
+  size_t replay_i = 0;
   std::vector<int> avail;
   std::vector<Thing> cur_things, prev_things;
   std::string log;
@@ -563,6 +575,37 @@ inline int l_explore(lua_State* L) {
   return explore_drive(L);
 }
 
+int replay_drive(lua_State* L);
+
+inline int replay_cont(lua_State* L, int, lua_KContext) { return replay_drive(L); }
+
+inline int replay_drive(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->replay_i >= hs->last_level.size()) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  const Act& a = hs->last_level[hs->replay_i++];
+  hs->want_a = a.a; hs->want_x = a.x; hs->want_y = a.y;
+  return lua_yieldk(L, 0, 0, replay_cont);
+}
+
+// replay() - do again whatever finished the previous level.
+//
+// These games repeat one rule across their levels, which is why a person's
+// action count falls after the first. Doing the same thing again is the
+// cheapest hypothesis there is, and if it is wrong it is wrong within a few
+// actions rather than a few hundred.
+inline int l_replay(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->last_level.empty()) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  hs->replay_i = 0;
+  return replay_drive(L);
+}
+
 inline int l_reset(lua_State* L) {
   Host* hs = host_of(L);
   hs->want_a = A_RESET; hs->want_x = 0; hs->want_y = 0;
@@ -628,6 +671,45 @@ inline std::string state_text(Host& hs) {
   s += "the board (one character per cell, rulers count from 0):\n";
   s += board_text(hs.cur, hs.scale);
   s += "positions above are only a picture; the list below is exact:\n";
+  // Which piece fits which hole, and which shape occurs more than once.
+  //
+  // The user said on the first day that these games are mostly matching, and
+  // the model said the same of cd82 unprompted. Making it read that off an
+  // ASCII board costs it attention it does not have to spare; computing it
+  // here costs no actions at all.
+  {
+    std::vector<Piece> ps = pieces(hs.cur, hs.scale);
+    std::vector<Match> ms = fits(ps);
+    if (!ms.empty()) {
+      s += "shapes that fit a gap somewhere else:\n";
+      for (size_t k = 0; k < ms.size(); ++k) {
+        std::snprintf(buf, sizeof buf,
+                      "  the '%c' shape %dx%d at (%d,%d) is the same shape as the gap at (%d,%d)\n",
+                      glyph_of(ms[k].thing->colour), ms[k].thing->w,
+                      ms[k].thing->h, ms[k].thing->cx, ms[k].thing->cy,
+                      ms[k].gap->cx, ms[k].gap->cy);
+        s += buf;
+      }
+    }
+    std::map<std::string, std::vector<const Piece*> > by = group_by_shape(ps);
+    int shown = 0;
+    for (std::map<std::string, std::vector<const Piece*> >::const_iterator it =
+             by.begin(); it != by.end() && shown < 6; ++it) {
+      if (it->second.size() < 2) continue;
+      if (shown == 0) s += "shapes that occur more than once:\n";
+      ++shown;
+      std::snprintf(buf, sizeof buf, "  %dx%d shape, %d of them:",
+                    it->second[0]->w, it->second[0]->h, int(it->second.size()));
+      s += buf;
+      for (size_t k = 0; k < it->second.size() && k < 8; ++k) {
+        std::snprintf(buf, sizeof buf, " '%c'(%d,%d)", glyph_of(it->second[k]->colour),
+                      it->second[k]->cx, it->second[k]->cy);
+        s += buf;
+      }
+      s += "\n";
+    }
+  }
+
   s += "objects now:\n";
   for (size_t k = 0; k < hs.cur_things.size() && k < 40; ++k) {
     const Thing& t = hs.cur_things[k];
@@ -689,6 +771,7 @@ inline void open_library(Host& hs) {
     {"click",      l_click},
     {"move_to",    l_move_to},
     {"explore",    l_explore},
+    {"replay",     l_replay},
     {"me",         l_me},
     {"walls",      l_walls},
     {"restart",    l_reset},
@@ -722,6 +805,8 @@ inline void observe(Host& hs, const Grid& g, int level, int state,
                   level, what, hs.last_a, hs.steps);
     hs.won_by = b;
     hs.level_seen = level;
+    hs.last_level = hs.this_level;
+    hs.this_level.clear();
   }
 
   int nw = W / hs.scale, nh = H / hs.scale;
@@ -786,6 +871,7 @@ inline int resume(Host& hs, int* out_a, int* out_x, int* out_y) {
   if (rc == LUA_YIELD) {
     *out_a = hs.want_a; *out_x = hs.want_x; *out_y = hs.want_y;
     hs.last_a = hs.want_a;
+    hs.this_level.push_back(Act(hs.want_a, hs.want_x, hs.want_y));
     ++hs.steps;
     return LUA_WANTS_ACTION;
   }

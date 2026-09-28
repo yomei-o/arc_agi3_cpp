@@ -29,13 +29,17 @@ cells. Coordinates count from 0.
 
 {board}
 {story}
-Write the moves that finish this level. One move per line, nothing else:
+Write the moves that finish this level. One instruction per line, nothing else:
 
-  press 1      press a button, 1 to {maxbutton}
-  click 12 7   click the cell at x=12, y=7
+  press 1            press a button, 1 to {maxbutton}
+  click 12 7         click the cell at x=12, y=7
+  move_to 12 7       walk to that cell by the shortest route, avoiding walls
+  repeat 6 press 4   do it six times
+  until change press 4   press it until the board changes (gives up after 20)
+  replay             do again whatever finished the previous level
 
-No loops, no conditions, no comments, no explanation - just the moves. At most
-{moves} of them.
+No other syntax: no comments, no explanation, no Lua. At most {moves} actions
+will be spent, so `repeat 6` counts as six.
 
 You are not told what the buttons do. If you have been told below what they did,
 use it; otherwise guess, and you will be told what happened.
@@ -45,23 +49,63 @@ over every attempt at this level. A human finishes a level like this in a few
 tens of moves. So write the shortest plan you believe in, not a careful search.
 """
 
-MOVE = re.compile(r"^\s*(?:press\s+([1-5])|click\s+(\d+)\s+(\d+))\s*$", re.I)
+# The whole grammar. Flat lists of moves were measured at 0 of 8 games three
+# times over - a plan that cannot react to anything is not a plan for a game
+# whose rules you do not know. These three forms are the least that fixes that:
+# say a thing several times, say it until something happens, and go somewhere.
+# The model still writes a procedure, not a search.
+PRESS = re.compile(r"^\s*press\s+([1-5])\s*$", re.I)
+CLICK = re.compile(r"^\s*click\s+(\d+)\s+(\d+)\s*$", re.I)
+GOTO = re.compile(r"^\s*move_?to\s+(\d+)\s+(\d+)\s*$", re.I)
+REPLAY = re.compile(r"^\s*replay\s*$", re.I)
+REPEAT = re.compile(r"^\s*repeat\s+(\d+)\s+(.*)$", re.I)
+UNTIL = re.compile(r"^\s*until\s+chang\w*\s+(.*)$", re.I)
+
+
+def _one(line: str):
+    """A single action, as Lua, or None."""
+    m = PRESS.match(line)
+    if m:
+        return "press(%s)" % m.group(1)
+    m = CLICK.match(line)
+    if m:
+        return "click(%s, %s)" % (m.group(1), m.group(2))
+    m = GOTO.match(line)
+    if m:
+        return "move_to(%s, %s)" % (m.group(1), m.group(2))
+    if REPLAY.match(line):
+        return "replay()"
+    return None
 
 
 def to_lua(text: str, cap: int) -> tuple:
-    """Turn the model's lines into a Lua script that just does them."""
-    steps = []
+    """Turn the model's instructions into Lua. Returns (script, actions)."""
+    steps, cost = [], 0
     for line in text.splitlines():
-        m = MOVE.match(line)
-        if not m:
-            continue
-        if m.group(1):
-            steps.append("press(%s)" % m.group(1))
-        else:
-            steps.append("click(%s, %s)" % (m.group(2), m.group(3)))
-        if len(steps) >= cap:
+        if cost >= cap:
             break
-    return "\n".join(steps), len(steps)
+        m = REPEAT.match(line)
+        if m:
+            inner = _one(m.group(2))
+            if inner:
+                n = min(int(m.group(1)), cap - cost)
+                if n > 0:
+                    steps.append("for _ = 1, %d do %s end" % (n, inner))
+                    cost += n
+            continue
+        m = UNTIL.match(line)
+        if m:
+            inner = _one(m.group(1))
+            if inner:
+                n = min(20, cap - cost)
+                steps.append("for _ = 1, %d do if %s then break end end" % (n, inner))
+                cost += n
+            continue
+        inner = _one(line)
+        if inner:
+            steps.append(inner)
+            cost += 1
+    return "\n".join(steps), cost
 
 
 def main() -> None:

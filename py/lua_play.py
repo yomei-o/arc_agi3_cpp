@@ -50,6 +50,9 @@ These functions exist and NOTHING else does. There is no io, no os, no require.
                     what changes a board when you do not yet know what to try.
                     Use it when you have no hypothesis; stop using it when you do.
   restart()      -> restart the current level.
+  replay()       -> do again whatever finished the previous level. These games
+                    repeat one rule across their levels, so this is the cheapest
+                    hypothesis there is. Returns false if no level is finished.
 
 Coordinates are cells, counted from 0. objects() is the truth about positions.
 
@@ -189,7 +192,7 @@ def play_one(lib, game: str, args) -> tuple:
                    "" if r["loaded"] else ", DID NOT COMPILE - write valid Lua",
                    r["log"][:600] or "(nothing)"))
         notes.append(note)
-        story = "".join(notes[-3:])
+        story = "".join(notes[-8:])
 
     print("\nRESULT game=%s levels=%d actions=%d level_actions=%s"
           % (game, sess.levels, sess.used, sess.level_actions), flush=True)
