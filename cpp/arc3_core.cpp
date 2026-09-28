@@ -405,8 +405,23 @@ int detect_scale(const Grid& g) {
         for (int s = 2; s <= 8; ++s) if (y % s == 0) ++hits[s];
       }
   if (edges < 16) return 1;
+
+  // Take the largest scale that explains nearly as many edges as the best one
+  // does, rather than demanding an absolute 90%.
+  //
+  // The absolute rule returned 1 on ka59, whose cells are 3 pixels across: the
+  // board carries furniture - a step counter, a border - whose edges do not sit
+  // on the cell grid, and a handful of them is enough to push every candidate
+  // under the bar. Returning 1 is not a small error. It makes one button press
+  // move the avatar three "cells", so every coordinate the agent reasons about
+  // and every coordinate it puts in a prompt is in units no action can take.
+  // The Python viewer has used the relative rule all along and reads ka59
+  // correctly; this is the same rule.
+  int best = 0;
+  for (int s = 2; s <= 8; ++s) best = std::max(best, hits[s]);
+  if (best * 2 < edges) return 1;              // nothing looks like a grid
   for (int s = 8; s >= 2; --s)
-    if (hits[s] * 10 >= edges * 9) return s;   // nearly every edge lands on the grid
+    if (hits[s] * 100 >= best * 95) return s;
   return 1;
 }
 
