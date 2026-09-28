@@ -25,6 +25,7 @@ extern "C" {
 #include "lualib.h"
 }
 
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -454,6 +455,11 @@ inline int l_walls(lua_State* L) {
   return 1;
 }
 
+inline int env_int(const char* name, int fallback) {
+  const char* v = std::getenv(name);
+  return v && *v ? atoi(v) : fallback;
+}
+
 // explore(n) - hand the next n actions to the policy that actually wins.
 //
 // The scripted agent had, at this point, won nothing: neither a policy written
@@ -492,6 +498,21 @@ inline int l_explore(lua_State* L) {
     std::vector<int> av = hs->avail;
     if (av.empty()) av.push_back(A1);
     hs->tab->init(av.data(), int(av.size()));
+
+    // Apply the settings the submitted agent applies, or this is not the
+    // policy that wins.
+    //
+    // The constructor's defaults are explore_mode 2 and alpha_grid 8, which is
+    // an older policy sweeping 256 points of bare board. agent_template.py
+    // overrides both from the environment and never runs those defaults, so
+    // nothing had noticed. Creating the Agent directly ran them, and explore()
+    // was measured for an afternoon as a weaker agent wearing mode 8's name:
+    // 2 games of 8, against 8 of 8 for the real thing.
+    hs->tab->explore_mode = env_int("ARC3_EXPLORE", 8);
+    hs->tab->alpha_objects = env_int("ARC3_ALPHA_OBJ", 24);
+    hs->tab->alpha_grid = env_int("ARC3_ALPHA_GRID", 0);
+    hs->tab->depth_cap = env_int("ARC3_DEPTH", 12);
+    hs->tab->budget = env_int("ARC3_BUDGET", 1 << 28);
   }
   hs->tab_left = int(luaL_optinteger(L, 1, 50));
   return explore_drive(L);
