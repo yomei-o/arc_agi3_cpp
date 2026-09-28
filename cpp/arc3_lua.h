@@ -693,11 +693,28 @@ inline bool start(Host& hs, const std::string& script) {
 
 enum { LUA_WANTS_ACTION = 1, LUA_DONE = 0, LUA_FAILED = -1 };
 
+// Stop a script that computes forever without ever acting.
+//
+// A model will eventually write `while true do ... end` with a condition that
+// nothing inside the loop can change, and then lua_resume never returns. One
+// such script burned a hundred minutes of processor and the whole eight-game
+// run produced nothing - and on the competition's machine it would quietly eat
+// the entire eight-hour session. A budget of VM instructions between actions
+// costs nothing and makes that failure a message instead of a hang.
+constexpr int THINK_LIMIT = 20000000;
+
+inline void think_too_long(lua_State* L, lua_Debug*) {
+  luaL_error(L, "the script ran for a long time without taking an action - "
+                "it is probably looping; act inside the loop or stop");
+}
+
 // Run the policy until it asks for an action, finishes, or breaks.
 inline int resume(Host& hs, int* out_a, int* out_x, int* out_y) {
   if (hs.finished) return hs.error.empty() ? LUA_DONE : LUA_FAILED;
   int nres = 0;
+  lua_sethook(hs.co, think_too_long, LUA_MASKCOUNT, THINK_LIMIT);
   int rc = lua_resume(hs.co, hs.L, 0, &nres);
+  lua_sethook(hs.co, nullptr, 0, 0);
   if (rc == LUA_YIELD) {
     *out_a = hs.want_a; *out_x = hs.want_x; *out_y = hs.want_y;
     hs.last_a = hs.want_a;
