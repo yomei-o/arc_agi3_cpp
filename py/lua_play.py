@@ -66,6 +66,17 @@ the actions it is allowed.
 """
 
 
+GOAL_PROMPT = """Here is one level of a grid puzzle video game, described as objects rather than
+pixels. You have not played it yet.
+
+In one or two sentences, say what you think the player must do to finish this
+level, and name the objects you mean by their glyph and position. Guess; you
+will get to correct it once you have seen what the actions do. Do not write
+code.
+
+"""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default="ka59", help="one id, a comma list, or 'all'")
@@ -115,8 +126,20 @@ def play_one(lib, game: str, args) -> tuple:
         return buf.value.decode("utf-8", "replace")
 
     story, notes = "", []
+
+    # Ask what the game is before asking what to do about it.
+    #
+    # The model can do this: shown objects rather than pixels it said of cd82
+    # "move the G object to align with the - object", which is the shape of
+    # nearly every one of these games. It was never asked here - the loop
+    # demanded code from the first token, so the hypothesis stayed implicit,
+    # could not be carried between turns, and could not be corrected when wrong.
+    goal = " ".join(ask(GOAL_PROMPT + briefing(), n_predict=160).split())[:400]
+    print("  goal guess: " + goal, flush=True)
+
     for turn in range(1, args.turns + 1):
-        prompt = (API + "\nWhat the board looks like now:\n" + briefing() + story +
+        prompt = (API + "\nWhat you think this game wants:\n  " + goal +
+                  "\n\nWhat the board looks like now:\n" + briefing() + story +
                   f"\nYou have {args.turns - turn + 1} turns left and may spend up"
                   f" to {args.budget} actions in this one. Write Lua only: no"
                   " fence, no prose, under forty lines - a script cut off in the"
