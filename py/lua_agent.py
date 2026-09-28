@@ -113,6 +113,11 @@ class Session:
         self.h = lib.arc3_lua_new(arr, len(self.avail))
         self.used = 0
         self.done = False
+        # Actions used when each level was finished. The score is per level,
+        # not per game: comparing a policy's whole-game total against another's
+        # per-level count says nothing, and saying it anyway is how an
+        # afternoon's "ninety times fewer actions" turned out to be backwards.
+        self.level_actions = []
         self._observe()
 
     def _observe(self):
@@ -149,6 +154,8 @@ class Session:
                 return {"spent": spent, "log": f"the game raised {type(e).__name__}: {e}",
                         "loaded": True}
             self._observe()
+            while len(self.level_actions) < self.levels:
+                self.level_actions.append(self.used)
             st = _STATE_CODE.get(getattr(self.obs.state, "value", str(self.obs.state)), 1)
             if st == 2:
                 self.done = True

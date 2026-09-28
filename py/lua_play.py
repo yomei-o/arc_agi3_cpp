@@ -125,7 +125,7 @@ def play_one(lib, game: str, args) -> tuple:
         # does not make the script better, it makes every turn three times
         # longer: the model fills whatever room it is given, and at twenty
         # tokens a second on a shared card that is a minute a turn.
-        script = ask(prompt, n_predict=480)
+        script = ask(prompt, n_predict=900)
         if args.keep:
             Path(args.keep + f".t{turn}.lua").write_text(script, encoding="utf-8")
         if not script.strip():
@@ -134,6 +134,18 @@ def play_one(lib, game: str, args) -> tuple:
 
         before_lv, before_st = sess.levels, sess.used
         r = sess.run(script, args.budget)
+
+        # A syntax error is worth one more call, not a whole turn. The model
+        # fixes its own Lua when shown the message, and a call is now seconds -
+        # where a turn is the scarce thing, because the game only moves on a
+        # script that runs.
+        if not r["loaded"]:
+            fix = ask("%s\nYou wrote this and it did not compile:\n%s\n"
+                      "The error was: %s\nWrite it again, correctly."
+                      % (prompt, script[:1500], r["log"][:300]), n_predict=900)
+            if fix.strip():
+                script = fix
+                r = sess.run(script, args.budget)
         gained = sess.levels - before_lv
         print(f"--- turn {turn}: spent={r['spent']} total={sess.used} "
               f"level={sess.levels}"
@@ -156,8 +168,8 @@ def play_one(lib, game: str, args) -> tuple:
         notes.append(note)
         story = "".join(notes[-3:])
 
-    print(f"\nRESULT game={game} levels={sess.levels} actions={sess.used}",
-          flush=True)
+    print("\nRESULT game=%s levels=%d actions=%d level_actions=%s"
+          % (game, sess.levels, sess.used, sess.level_actions), flush=True)
     lv, used = sess.levels, sess.used
     sess.close()
     return (game, lv, used)

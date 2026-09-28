@@ -89,24 +89,34 @@ SERVER = os.environ.get("LLAMA_SERVER", "http://127.0.0.1:8080")
 def ask_server(prompt: str, n_predict: int) -> str:
     """Ask a resident model. Returns None if there is no server to ask.
 
-    Every call through llama-cli reloads 15.7GB before it says anything, which
-    is ten to fifteen seconds of the roughly forty a call was taking. Sixty-four
-    calls made an eight-game run take an hour, and almost none of that hour was
-    the experiment. With the model resident a call is five to eight seconds.
+    Through the chat endpoint, not /completion. The model is an instruct model
+    and /completion hands it raw text with no chat template, which is how an
+    afternoon produced seven answers that were prose and eight scripts that did
+    not compile. The template is not decoration; it is how the model knows it
+    was asked something.
+
+    Every call through llama-cli reloaded 15.7GB before it said anything - ten
+    to fifteen seconds of the forty a call was taking. With the model resident a
+    call is a few seconds.
     """
-    import json, urllib.request, urllib.error
+    import json, urllib.request
     body = json.dumps({
-        "prompt": prompt,
-        "n_predict": n_predict,
+        "messages": [
+            {"role": "system",
+             "content": "You write Lua programs. You reply with Lua source and "
+                        "nothing else: no markdown fence, no explanation."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": n_predict,
         "temperature": 0.2,
-        "cache_prompt": True,
-        "stop": ["\n\n\n"],
+        "chat_template_kwargs": {"enable_thinking": False},
     }).encode("utf-8")
-    req = urllib.request.Request(SERVER + "/completion", data=body,
+    req = urllib.request.Request(SERVER + "/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
-            return json.load(r).get("content", "")
+            d = json.load(r)
+        return d["choices"][0]["message"]["content"]
     except Exception:
         return None
 
