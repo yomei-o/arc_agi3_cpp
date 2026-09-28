@@ -158,7 +158,9 @@ def play_one(lib, game: str, args) -> tuple:
 
     print(f"\nRESULT game={game} levels={sess.levels} actions={sess.used}",
           flush=True)
+    lv, used = sess.levels, sess.used
     sess.close()
+    return (game, lv, used)
 
 
 if __name__ == "__main__":

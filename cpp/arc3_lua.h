@@ -177,6 +177,7 @@ struct Host {
 
   // move_to state, carried across the yields it makes
   int mv_tx = 0, mv_ty = 0, mv_left = 0;
+  size_t calib = 0;   // which button move_to is still trying out
 
   // How long one stretch of thinking may take before it counts as a loop.
   int think_seconds = 5;
@@ -427,6 +428,22 @@ inline int move_cont(lua_State* L, int, lua_KContext) { return move_drive(L); }
 
 inline int move_drive(lua_State* L) {
   Host* hs = host_of(L);
+
+  // Learn the buttons if nobody has. move_to cannot plan a route without
+  // knowing what a button does, and the host cannot know until something has
+  // been pressed - so the first version returned false having spent nothing,
+  // and a perfectly sensible script said "could not reach" and stopped. A
+  // person in that position presses each button once. So does this.
+  if (hs->button.empty() && hs->calib < hs->avail.size()) {
+    while (hs->calib < hs->avail.size()) {
+      int a = hs->avail[hs->calib++];
+      if (a >= A1 && a <= A5) {
+        hs->want_a = a; hs->want_x = 0; hs->want_y = 0;
+        return lua_yieldk(L, 0, 0, move_cont);
+      }
+    }
+  }
+
   const Thing* me = avatar(*hs);
   if (me && me->cx == hs->mv_tx && me->cy == hs->mv_ty) {
     lua_pushboolean(L, 1);
