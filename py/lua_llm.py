@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 CLI = Path(os.environ.get("LLAMA_CLI", r"C:\prog\llama.cpp\build-cuda\bin\Release\llama-cli.exe"))
 MODEL = Path(os.environ.get("LLAMA_MODEL", r"C:\models\Qwen3.6-27B-Q4_K_M.gguf"))
 
+GLYPHS = ".:-=+*#%@ABCDEFG"
+
 API = """\
 You are writing a Lua policy that plays one level of a grid puzzle game.
 The script runs to completion; there is no main loop to return to.
@@ -50,6 +52,9 @@ These functions exist and NOTHING else does. There is no io, no os, no require.
   click(x, y)    -> click that cell. Returns true if the board changed.
   restart()      -> restart the current level.
 
+Coordinates are cells, counted from 0. objects() is the truth about what is on
+the board; do not work positions out any other way.
+
 press, click and restart each cost one action and give the board back changed.
 Your score is (the number of actions a human needed / the number you used),
 squared. Finishing a level in 30 actions where a human took 25 scores well;
@@ -59,15 +64,23 @@ sweep the board.
 
 PREAMBLE = """\
 Write a Lua script that finishes this level. Reply with Lua only: no markdown
-fence, no explanation, no comments about what you cannot do.
+fence, no prose, no apology for what you cannot see.
 
-Work it out from the board and from what the actions do. Use say() to record
-what you concluded, so that if the script fails I can tell you why.
+You are not told the rules; work them out. A good script presses a button,
+looks at changes(), and decides what to do next - it does not assume. Use say()
+to record what you concluded, so that if it fails I can tell you why.
 """
 
 
 def ask(prompt: str, n_predict: int = 700) -> str:
-    """One call to the model. Thinking is off; it answers with the script."""
+    """One call to the model. Thinking is off; it answers with the script.
+
+    The answer is found by subtracting the prompt, not by hunting for where it
+    starts. llama-cli echoes what it was given and prints a banner, and the
+    banner goes to stderr so it interleaves at no fixed place. Position cannot
+    separate them; set membership can. The first filter let "Loading model..."
+    through and Lua was handed it as a program.
+    """
     p = Path(os.environ.get("TEMP", ".")) / "lua_llm_prompt.txt"
     p.write_text(prompt, encoding="utf-8")
     r = subprocess.run(
@@ -75,21 +88,51 @@ def ask(prompt: str, n_predict: int = 700) -> str:
          "-c", "16384", "-n", str(n_predict), "--temp", "0.2",
          "--jinja", "--reasoning-budget", "0", "--no-display-prompt"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
-    out = r.stdout or ""
-    # llama-cli writes its banner and timings around the answer
-    lines = [l for l in out.splitlines()
-             if all(ord(c) < 128 for c in l)
-             and not l.startswith(("build ", "model ", "ftype", "modalities",
-                                   "[ Prompt", "Exiting", "load", "llama_"))]
-    text = "\n".join(lines)
+
+    noise = ("build ", "model ", "ftype", "modalities", "[ Prompt", "Exiting",
+             "load", "llama_", "Loading", "available commands", "/exit",
+             "/regen", "/clear", "/read", "/glob", ">")
+    plines = [l.strip() for l in prompt.splitlines() if l.strip()]
+    echoed = set(plines)
+    keep = []
+    for line in (r.stdout or "").splitlines():
+        t = line.strip()
+        if not all(ord(c) < 128 for c in line):
+            continue
+        if t in echoed or t.startswith(noise) or "(truncated)" in t:
+            continue
+        # llama-cli cuts the echoed prompt mid-line, so the tail of the cut line
+        # matches nothing in the set. A prefix of a prompt line is still prompt.
+        if t and any(q.startswith(t) for q in plines):
+            continue
+        keep.append(line)
+    text = "\n".join(keep)
     text = re.sub(r"^```[a-z]*$|^```$", "", text, flags=re.M)
     return text.strip()
 
 
 def describe(game: str) -> str:
-    """The board and what each action does, in the vocabulary of objects."""
+    """What is on the board and what each action does - as objects, not pixels.
+
+    The first version pasted the board as text as well. The model then ignored
+    the object list it had been given, counted columns in the ASCII by hand, got
+    a different answer, argued with itself for four hundred tokens and emitted
+    no program at all. Which is the day's lesson arriving from the other side: a
+    model reasons in the vocabulary it is given, so handing it two vocabularies
+    and letting it choose is worse than handing it one.
+    """
     from llm_probe import probe
-    return probe(game)
+    out, skipping = [], False
+    for line in probe(game).splitlines():
+        if line.startswith("BOARD:"):
+            skipping = True
+            continue
+        if skipping:
+            if line.strip() and all(c in GLYPHS for c in line.strip()):
+                continue
+            skipping = False
+        out.append(line)
+    return "\n".join(out)
 
 
 def main() -> None:
@@ -107,29 +150,31 @@ def main() -> None:
     history = ""
     best = None
     for rnd in range(1, args.rounds + 1):
-        prompt = f"{API}\n{board}\n{history}\n{PREAMBLE}"
+        prompt = API + "\n" + board + "\n" + history + "\n" + PREAMBLE
         script = ask(prompt)
         if not script:
-            print(f"round {rnd}: the model said nothing")
+            print(f"round {rnd}: the model said nothing", flush=True)
             continue
+        if args.keep:
+            Path(args.keep + f".r{rnd}.lua").write_text(script, encoding="utf-8")
         r = lua_agent.play(lib, args.game, script, args.max, False)
         log = (r.get("log") or r.get("error") or "").strip()
-        print(f"--- round {rnd}: levels={r.get('levels', 0)} actions={r.get('actions', 0)}")
+        print(f"--- round {rnd}: levels={r.get('levels', 0)} "
+              f"actions={r.get('actions', 0)}", flush=True)
         if log:
-            print(textwrap.indent(log[:1200], "    "))
-        if args.keep:
-            Path(args.keep).with_suffix(f".r{rnd}.lua").write_text(script, encoding="utf-8")
+            print(textwrap.indent(log[:1200], "    "), flush=True)
         if best is None or r.get("levels", 0) > best.get("levels", 0):
             best = dict(r, script=script)
         if r.get("levels", 0) > 0:
             break
-        history = ("\nYour previous script ran and this is what happened. "
-                   f"It finished {r.get('levels', 0)} levels in {r.get('actions', 0)} "
-                   "actions. Its log was:\n" + (log[:1500] or "(nothing)") +
+        history = ("\nYour previous script ran. It finished "
+                   f"{r.get('levels', 0)} levels in {r.get('actions', 0)} actions. "
+                   "Its log was:\n" + (log[:1500] or "(nothing)") +
                    "\nWrite a better script.\n")
 
-    print(f"\nBEST game={args.game} levels={best.get('levels', 0) if best else 0} "
-          f"actions={best.get('actions', 0) if best else 0}")
+    lv = best.get("levels", 0) if best else 0
+    ac = best.get("actions", 0) if best else 0
+    print(f"\nBEST game={args.game} levels={lv} actions={ac}", flush=True)
 
 
 if __name__ == "__main__":
