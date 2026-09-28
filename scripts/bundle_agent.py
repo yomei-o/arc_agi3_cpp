@@ -20,6 +20,12 @@ OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "agent" / "my_agent.py"
 
 _LOCAL_INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"\s*$')
 
+# The Lua layer is for the scripted agent, which is not what gets submitted.
+# It sits behind #ifdef ARC3_WITH_LUA so it would compile away harmlessly, but
+# it also pulls lua.h, which the notebook has no way to find. Leaving it out
+# keeps the thing that ships from depending on a toolchain it never uses.
+_SKIP = {"arc3_lua.h"}
+
 
 def expand(path: Path, seen: set[Path]) -> list[str]:
     path = path.resolve()
@@ -29,6 +35,8 @@ def expand(path: Path, seen: set[Path]) -> list[str]:
     out: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         m = _LOCAL_INCLUDE.match(line)
+        if m and Path(m.group(1)).name in _SKIP:
+            continue
         if m:
             target = (path.parent / m.group(1)).resolve()
             if target.exists():
