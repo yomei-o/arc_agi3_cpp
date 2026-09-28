@@ -1,0 +1,117 @@
+r"""Play a game by asking the model for the next few moves, over and over.
+
+One script written at the start cannot play these games: the model has not seen
+the level yet, and the thing it needs to know - what the buttons do, what the
+goal reacts to - is only learned by acting. So the game, and everything the host
+has learned about it, outlive each script. The model writes a few moves, sees
+what they did, and writes a few more.
+
+    python lua_play.py --game ka59 --turns 8 --budget 120
+
+Runs on the build machine: it needs the ARC environment, g++, and the model.
+"""
+from __future__ import annotations
+
+import argparse, ctypes, os, sys, textwrap
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import lua_agent
+from lua_llm import ask
+
+API = """\
+You are playing one level of a grid puzzle game by writing short Lua scripts.
+You write a few moves, I run them, and I show you what happened. Then you write
+the next few. The game does not restart between your scripts and everything you
+have learned stays learned.
+
+These functions exist and NOTHING else does. There is no io, no os, no require.
+
+  objects()      -> array of objects: x, y, colour, glyph, area, w, h, minx, miny
+  changes()      -> what the LAST action did: kind = "moved" (with dx, dy, fx, fy),
+                    "appeared" or "vanished", each with colour, area, x, y
+  at(x, y)       -> the colour of that cell, or nil off the board
+  size()         -> width, height in cells
+  level()        -> how many levels are finished
+  steps()        -> how many actions used so far
+  actions()      -> which buttons this game offers
+  me()           -> the object you control, or nil until something has moved
+  walls()        -> the cells that have been found impassable
+  say(text)      -> write a line I will show you afterwards
+
+  press(n)       -> press button n (1..5). Returns true if the board changed.
+  click(x, y)    -> click that cell. Returns true if the board changed.
+  move_to(x, y)  -> walk there by the shortest route known, avoiding walls.
+                    Returns true on arrival, false if there is no route.
+                    It costs one action per step and is the cheapest way to get
+                    anywhere. Do not write your own walking loop.
+  explore(n)     -> hand the next n actions to a search that is good at finding
+                    what changes a board when you do not yet know what to try.
+                    Use it when you have no hypothesis; stop using it when you do.
+  restart()      -> restart the current level.
+
+Coordinates are cells, counted from 0. objects() is the truth about positions.
+
+Your score is (the actions a human needed / the actions you used), squared. A
+level finished in 30 actions where a human took 25 scores well; the same level
+in 500 scores nothing. Spend actions on a hypothesis, not on sweeping.
+"""
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--game", default="ka59")
+    ap.add_argument("--turns", type=int, default=8)
+    ap.add_argument("--budget", type=int, default=120, help="actions per turn")
+    ap.add_argument("--keep", default="")
+    args = ap.parse_args()
+
+    lib = lua_agent.build()
+    sess = lua_agent.Session(lib, args.game)
+
+    buf = ctypes.create_string_buffer(65536)
+    lib.arc3_lua_state.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    lib.arc3_lua_state.restype = ctypes.c_int
+
+    def briefing() -> str:
+        lib.arc3_lua_state(sess.h, buf, len(buf))
+        return buf.value.decode("utf-8", "replace")
+
+    story = ""
+    for turn in range(1, args.turns + 1):
+        prompt = (API + "\nWhat the board looks like now:\n" + briefing() + story +
+                  f"\nWrite the next few moves as Lua, at most {args.budget} actions"
+                  " worth. Reply with Lua only: no fence, no prose. Keep it under"
+                  " forty lines - a script cut off in the middle does not run.\n")
+        script = ask(prompt, n_predict=1200)
+        if args.keep:
+            Path(args.keep + f".t{turn}.lua").write_text(script, encoding="utf-8")
+        if not script.strip():
+            print(f"turn {turn}: the model wrote nothing", flush=True)
+            break
+
+        before_lv, before_st = sess.levels, sess.used
+        r = sess.run(script, args.budget)
+        gained = sess.levels - before_lv
+        print(f"--- turn {turn}: spent={r['spent']} total={sess.used} "
+              f"level={sess.levels}" + ("  LEVEL UP" if gained else ""), flush=True)
+        if r["log"]:
+            print(textwrap.indent(r["log"][:600], "    "), flush=True)
+
+        if sess.done:
+            print("game won", flush=True)
+            break
+        story = ("\nYour last script spent " + str(r["spent"]) + " actions. "
+                 + ("It finished a level. " if gained else "No level finished. ")
+                 + "It said:\n" + (r["log"][:800] or "(nothing)") + "\n")
+        if not r["loaded"]:
+            story += ("It did not compile, so none of it ran. Write valid Lua.\n")
+
+    print(f"\nRESULT game={args.game} levels={sess.levels} actions={sess.used}",
+          flush=True)
+    sess.close()
+
+
+if __name__ == "__main__":
+    main()
