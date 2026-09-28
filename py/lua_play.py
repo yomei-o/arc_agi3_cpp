@@ -121,7 +121,11 @@ def play_one(lib, game: str, args) -> tuple:
                   f" to {args.budget} actions in this one. Write Lua only: no"
                   " fence, no prose, under forty lines - a script cut off in the"
                   " middle does not run at all.\n")
-        script = ask(prompt, n_predict=1200)
+        # Forty lines of Lua is about four hundred tokens. Asking for 1200
+        # does not make the script better, it makes every turn three times
+        # longer: the model fills whatever room it is given, and at twenty
+        # tokens a second on a shared card that is a minute a turn.
+        script = ask(prompt, n_predict=480)
         if args.keep:
             Path(args.keep + f".t{turn}.lua").write_text(script, encoding="utf-8")
         if not script.strip():
