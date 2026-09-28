@@ -25,6 +25,7 @@ extern "C" {
 #include "lualib.h"
 }
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -162,9 +163,108 @@ struct Host {
 
   // set by press/click just before they yield
   int want_a = 0, want_x = 0, want_y = 0;
+  int last_a = 0;               // what the host actually applied
+
+  // What the host has worked out for itself, so the script need not.
+  int av_colour = -1, av_area = -1;          // the avatar, once something moved
+  std::map<int, Vec> button;                 // button -> the step it takes
+  std::vector<uint8_t> blocked;              // logical cells we failed to enter
+  std::set<int> wall_colour;                 // and the colours those cells were
+  int bw = 0, bh = 0;
+
+  // move_to state, carried across the yields it makes
+  int mv_tx = 0, mv_ty = 0, mv_left = 0;
 
   ~Host() { if (L) lua_close(L); }
 };
+
+// Learn the two things a walking game never tells you: which shape is you, and
+// which buttons move it where.
+//
+// Both are free. The host already computes the object-level diff for changes(),
+// so the sprite that moved under a button IS the avatar and the displacement IS
+// what that button does. And when a button with a known step leaves the avatar
+// where it was, the cell it was aimed at is a wall - which is the one fact a
+// script written by a language model never keeps, and the reason the first one
+// bounced off the same wall for twelve hundred actions.
+inline void learn(Host& hs) {
+  if (hs.last_a < 1 || hs.last_a > 5) return;
+  std::vector<Event> ev = diff_things(hs.prev_things, hs.cur_things);
+  for (size_t i = 0; i < ev.size(); ++i) {
+    if (std::strcmp(ev[i].kind, "moved") != 0) continue;
+    if (hs.av_colour >= 0 && ev[i].colour != hs.av_colour) continue;
+    hs.av_colour = ev[i].colour;
+    hs.av_area = ev[i].area;
+    hs.button[hs.last_a] = Vec(ev[i].tx - ev[i].fx, ev[i].ty - ev[i].fy);
+    return;
+  }
+  // nothing moved: if we know what this button does, we just met a wall
+  std::map<int, Vec>::const_iterator it = hs.button.find(hs.last_a);
+  if (it == hs.button.end() || hs.av_colour < 0) return;
+  for (size_t i = 0; i < hs.prev_things.size(); ++i) {
+    const Thing& t = hs.prev_things[i];
+    if (t.colour != hs.av_colour || t.area != hs.av_area) continue;
+    int nx = t.cx + it->second.dx, ny = t.cy + it->second.dy;
+    if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) return;
+    hs.blocked[size_t(ny) * size_t(hs.bw) + size_t(nx)] = 1;
+    // Generalise from the one cell to its colour.
+    //
+    // Remembering only the square we bumped into means walking the length of a
+    // wall and learning it a square at a time, which on ka59 spent eighty
+    // actions to discover four cells of the same barrier. These boards are made
+    // of colours, not of squares: if red stopped us once, red stops us.
+    hs.wall_colour.insert(int(hs.cur.at(nx * hs.scale, ny * hs.scale)));
+    return;
+  }
+}
+
+inline const Thing* avatar(const Host& hs) {
+  for (size_t i = 0; i < hs.cur_things.size(); ++i)
+    if (hs.cur_things[i].colour == hs.av_colour && hs.cur_things[i].area == hs.av_area)
+      return &hs.cur_things[i];
+  return nullptr;
+}
+
+// The first button of a shortest route to (tx,ty), or 0 if there is none.
+//
+// This is the whole argument for putting primitives in C++ rather than letting
+// the model write its own loop. The score is (human actions / ours) squared, so
+// a route that wanders is not merely inelegant, it is most of the score. A
+// breadth-first search over the steps we have learned, avoiding the walls we
+// have hit, is optimal for the map we know - and it costs the script one line.
+inline int first_step_towards(const Host& hs, int tx, int ty) {
+  const Thing* me = avatar(hs);
+  if (!me || hs.button.empty() || hs.bw <= 0) return 0;
+  if (me->cx == tx && me->cy == ty) return 0;
+
+  const size_t n = size_t(hs.bw) * size_t(hs.bh);
+  std::vector<int> first(n, -1);
+  std::vector<uint8_t> seen(n, 0);
+  std::vector<int> q;
+  q.reserve(n);
+  size_t start = size_t(me->cy) * size_t(hs.bw) + size_t(me->cx);
+  seen[start] = 1;
+  q.push_back(int(start));
+
+  for (size_t qi = 0; qi < q.size(); ++qi) {
+    int cur = q[qi];
+    int cx = cur % hs.bw, cy = cur / hs.bw;
+    for (std::map<int, Vec>::const_iterator it = hs.button.begin();
+         it != hs.button.end(); ++it) {
+      int nx = cx + it->second.dx, ny = cy + it->second.dy;
+      if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) continue;
+      size_t ni = size_t(ny) * size_t(hs.bw) + size_t(nx);
+      if (seen[ni] || hs.blocked[ni]) continue;
+      if (!(nx == tx && ny == ty) &&
+          hs.wall_colour.count(int(hs.cur.at(nx * hs.scale, ny * hs.scale)))) continue;
+      seen[ni] = 1;
+      first[ni] = (cur == int(start)) ? it->first : first[size_t(cur)];
+      if (nx == tx && ny == ty) return first[ni];
+      q.push_back(int(ni));
+    }
+  }
+  return 0;
+}
 
 inline void push_thing(lua_State* L, const Thing& t) {
   lua_newtable(L);
@@ -284,6 +384,64 @@ inline int l_click(lua_State* L) {
   return lua_yieldk(L, 0, 0, act_resume);
 }
 
+// move_to(x, y [, limit]) - walk there, however many actions that takes.
+//
+// One Lua call, many yields: the continuation re-enters the same decision, so
+// the script says where it wants to be and the host spends the actions. This is
+// the shape every primitive here should have. A model is good at deciding where
+// to go and bad at not bouncing off a wall on the way.
+int move_drive(lua_State* L);
+
+inline int move_cont(lua_State* L, int, lua_KContext) { return move_drive(L); }
+
+inline int move_drive(lua_State* L) {
+  Host* hs = host_of(L);
+  const Thing* me = avatar(*hs);
+  if (me && me->cx == hs->mv_tx && me->cy == hs->mv_ty) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  int b = (hs->mv_left-- > 0) ? first_step_towards(*hs, hs->mv_tx, hs->mv_ty) : 0;
+  if (b == 0) {
+    lua_pushboolean(L, 0);        // no route we know of, or out of patience
+    return 1;
+  }
+  hs->want_a = b; hs->want_x = 0; hs->want_y = 0;
+  return lua_yieldk(L, 0, 0, move_cont);
+}
+
+inline int l_move_to(lua_State* L) {
+  Host* hs = host_of(L);
+  hs->mv_tx = int(luaL_checkinteger(L, 1));
+  hs->mv_ty = int(luaL_checkinteger(L, 2));
+  hs->mv_left = int(luaL_optinteger(L, 3, 200));
+  return move_drive(L);
+}
+
+// Who the host thinks you are, and what it has learned the buttons do.
+inline int l_me(lua_State* L) {
+  Host* hs = host_of(L);
+  const Thing* me = avatar(*hs);
+  if (!me) { lua_pushnil(L); return 1; }
+  push_thing(L, *me);
+  return 1;
+}
+
+inline int l_walls(lua_State* L) {
+  Host* hs = host_of(L);
+  lua_newtable(L);
+  int k = 0;
+  for (int y = 0; y < hs->bh; ++y)
+    for (int x = 0; x < hs->bw; ++x)
+      if (hs->blocked[size_t(y) * size_t(hs->bw) + size_t(x)]) {
+        lua_newtable(L);
+        lua_pushinteger(L, x); lua_setfield(L, -2, "x");
+        lua_pushinteger(L, y); lua_setfield(L, -2, "y");
+        lua_rawseti(L, -2, ++k);
+      }
+  return 1;
+}
+
 inline int l_reset(lua_State* L) {
   Host* hs = host_of(L);
   hs->want_a = A_RESET; hs->want_x = 0; hs->want_y = 0;
@@ -338,6 +496,9 @@ inline void open_library(Host& hs) {
     {"say",        l_say},
     {"press",      l_press},
     {"click",      l_click},
+    {"move_to",    l_move_to},
+    {"me",         l_me},
+    {"walls",      l_walls},
     {"restart",    l_reset},
     {nullptr, nullptr},
   };
@@ -356,6 +517,13 @@ inline void observe(Host& hs, const Grid& g, int level, const std::vector<int>& 
   hs.scale = detect_scale(g);
   if (hs.scale < 1) hs.scale = 1;
   hs.cur_things = things_of(g, hs.scale);
+
+  int nw = W / hs.scale, nh = H / hs.scale;
+  if (nw != hs.bw || nh != hs.bh) {
+    hs.bw = nw; hs.bh = nh;
+    hs.blocked.assign(size_t(nw) * size_t(nh), 0);
+  }
+  learn(hs);
 }
 
 // Load the policy. Returns false and fills hs.error if it does not compile.
@@ -379,6 +547,7 @@ inline int resume(Host& hs, int* out_a, int* out_x, int* out_y) {
   int rc = lua_resume(hs.co, hs.L, 0, &nres);
   if (rc == LUA_YIELD) {
     *out_a = hs.want_a; *out_x = hs.want_x; *out_y = hs.want_y;
+    hs.last_a = hs.want_a;
     ++hs.steps;
     return LUA_WANTS_ACTION;
   }
