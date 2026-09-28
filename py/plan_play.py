@@ -100,6 +100,15 @@ def one(lib, game: str, args) -> tuple:
     lib.arc3_lua_state.restype = ctypes.c_int
 
     maxbutton = max([a for a in sess.avail if 1 <= a <= 5] or [1])
+
+    # Four actions of probing before the first plan, because that is what a
+    # person does: press each key once, see what moves, and only then decide
+    # where to go. A flat list of moves cannot branch, so it cannot contain its
+    # own probe - the first thirty moves were pure guesswork every time.
+    probe = "\n".join("press(%d)" % a for a in sess.avail if 1 <= a <= 5)
+    if probe:
+        sess.run(probe, 6)
+
     story = ""
     for attempt in range(1, args.tries + 1):
         lib.arc3_lua_state(sess.h, buf, len(buf))
