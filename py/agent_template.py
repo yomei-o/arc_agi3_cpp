@@ -174,7 +174,7 @@ class MyAgent(Agent):
             # frame, and sample by the posterior mean. It is the official
             # sample's idea without the network, and on the 25 public games it
             # completes 8 levels against 3-4 for every other mode here.
-            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "13")))
+            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
             # ARC3_ALPHA_GRID=0: offer only object centroids as click targets.
             # The coarse sweep was 256 candidates against ~48 objects, diluting
             # the search five to one, and every click that ended a level in the
