@@ -106,6 +106,8 @@ def _build_core() -> ctypes.CDLL | None:
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_replay.argtypes = [ctypes.c_int, ctypes.c_int]
+    dll.arc3_set_handover.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_forget.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_trigger.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_clear_stats.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -172,7 +174,7 @@ class MyAgent(Agent):
             # frame, and sample by the posterior mean. It is the official
             # sample's idea without the network, and on the 25 public games it
             # completes 8 levels against 3-4 for every other mode here.
-            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "8")))
+            core.arc3_set_explore(self._h, int(os.environ.get("ARC3_EXPLORE", "13")))
             # ARC3_ALPHA_GRID=0: offer only object centroids as click targets.
             # The coarse sweep was 256 candidates against ~48 objects, diluting
             # the search five to one, and every click that ended a level in the
@@ -182,6 +184,8 @@ class MyAgent(Agent):
                                    int(os.environ.get("ARC3_ALPHA_OBJ", "24")),
                                    int(os.environ.get("ARC3_ALPHA_GRID", "0")))
             core.arc3_set_depth(self._h, int(os.environ.get("ARC3_DEPTH", "12")))
+            core.arc3_set_replay(self._h, int(os.environ.get("ARC3_REPLAY", "0")))
+            core.arc3_set_handover(self._h, int(os.environ.get("ARC3_HANDOVER", "60")))
             core.arc3_set_forget(self._h, int(os.environ.get("ARC3_FORGET", "0")))
             core.arc3_set_trigger(self._h, int(os.environ.get("ARC3_TRIGGER", "0")))
             core.arc3_set_clear_stats(self._h, int(os.environ.get("ARC3_CLEAR", "1")))

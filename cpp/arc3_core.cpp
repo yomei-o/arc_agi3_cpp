@@ -707,6 +707,19 @@ struct Agent {
   bool replaying;
   int restarts;
 
+  // The actions that finished the last level, to try again at the start of the
+  // next one.
+  //
+  // These games repeat one rule across their levels. That is visible in the
+  // human baselines: lp85 costs a person 17, 38, 31, 16, 41, 60, 26, 159 and
+  // the later levels are cheap because they already know what the game wants.
+  // This agent forgot at every level boundary and paid the first level's price
+  // again each time. Doing the same thing again is the cheapest hypothesis
+  // there is, and it costs at most as many actions as the last level did.
+  std::vector<Act> last_solution;
+  int replay_cap;               // longest solution worth repeating
+  int handover;                 // actions of a level the counting policy gets
+
   Agent()
       : rng(12345), has6(false), have_prev(false), steps(0), levels(0),
         av_color(-1), av_w(0), av_h(0), av_support(0), avatar_known(false),
@@ -723,7 +736,7 @@ struct Agent {
         rollout_len(60), since_restart(0), have_scene(false),
         sticky_a(-1), sticky_x(0), sticky_y(0),
         rule_target(-1), repeats(0), escalation(0), last_state(0),
-        replaying(false), restarts(0) {
+        replaying(false), restarts(0), replay_cap(0), handover(25) {
     ge_ready = false;
     have_prev_s32 = false;
     prev_action_idx = -1;
@@ -1059,6 +1072,15 @@ struct Agent {
       have_prev_s32 = false;
     }
     if (explore_mode == 5 || explore_mode == 6) idd_begin();
+
+    // Try the last level's answer first. It costs what that level cost, which
+    // is small when it mattered, and when it works the new level is finished at
+    // very close to a person's action count - which is the only thing the score
+    // rewards.
+    if (replay_cap > 0 && !last_solution.empty()) {
+      replay_queue = last_solution;
+      replaying = true;
+    }
   }
 
   void observe(const int8_t* frame, int levels_completed, int state) {
@@ -1145,6 +1167,11 @@ struct Agent {
         if (!idd_played.empty()) idd_solution = idd_played;
         idd_try_solution = false;
       }
+      // Keep the route that just worked, if it was short enough to be worth
+      // repeating. A long one is a record of wandering, not of a solution.
+      if (int(level_traj.size()) <= replay_cap) last_solution = level_traj;
+      else last_solution.clear();
+
       levels = levels_completed;
       trigger_action = last_action;
       trigger_valid = true;
@@ -2020,6 +2047,23 @@ uint64_t scene_key(int levels) const {
   int choose() {
     std::set<int> bg = background_colors(cur);
 
+    // Play out a queued route before anything else.
+    //
+    // This used to live further down, after the per-mode branches, and mode 8 -
+    // the one that is actually submitted - returns from novelty_sample() long
+    // before reaching it. So the queue filled at each level boundary and was
+    // never read, and replaying the last level's answer measured as exactly no
+    // change, because it never happened.
+    if (replaying) {
+      if (!replay_queue.empty()) {
+        Act a = replay_queue.front();
+        replay_queue.erase(replay_queue.begin());
+        if (replay_queue.empty()) replaying = false;
+        return emit(a.a, a.x, a.y);
+      }
+      replaying = false;
+    }
+
     if (explore_mode == 11) {
       if (last_state == 3) return emit(A_RESET, 0, 0);
       if (!calib_queue.empty()) {
@@ -2197,6 +2241,51 @@ uint64_t scene_key(int levels) const {
       }
 
       return novelty_sample(bg);
+    }
+
+    // Mode 13: give the counting policy the opening of each level, and hand
+    // over to the directed heuristic if it has not won by then.
+    //
+    // Both policies win early or not at all. The counting policy takes tn36 and
+    // r11l at or below a person's action count, inside about twenty actions;
+    // the directed heuristic takes lp85's first level in exactly the seventeen
+    // a person needs, and the counting policy never takes it at all. So the
+    // order matters and interleaving does not work - mode 12 alternated them
+    // action by action and scored 0.04, because the counting policy's plan and
+    // its counters assume its own moves are the ones being played.
+    //
+    // Giving the opening to the counting policy costs it nothing: it keeps the
+    // games it wins fast. The heuristic then gets lp85 twenty-five actions
+    // late, which is a ratio of 17/42 rather than 17/17 - a quarter of the
+    // points for that level instead of none.
+    if (explore_mode == 13) {
+      int saved = explore_mode;
+      explore_mode = (int(level_traj.size()) < handover) ? 8 : 0;
+      int a = choose();
+      explore_mode = saved;
+      return a;
+    }
+
+    // Mode 12: alternate between the two policies action by action.
+    //
+    // They win different games. Measured over the 25 public games, the directed
+    // heuristic finishes lp85's first level in exactly the seventeen actions a
+    // person needs, and the counting policy never finishes it at all inside
+    // 546; the counting policy finishes tn36 and r11l at or below human cost,
+    // and the heuristic finishes neither. The levels they score on do not
+    // overlap at all.
+    //
+    // Mode 7 already switches between them, but by thirds of the budget, and
+    // both of these wins happen in the first twenty actions - so whichever
+    // policy holds the opening takes its games and denies the other one. Taking
+    // turns costs each of them a factor of two in actions, which is a factor of
+    // four in a squared ratio, and keeps both.
+    if (explore_mode == 12) {
+      int saved = explore_mode;
+      explore_mode = (steps % 2 == 0) ? 0 : 8;
+      int a = choose();
+      explore_mode = saved;
+      return a;
     }
 
     // Mode 7: spend the budget on several policies in turn.
@@ -2727,6 +2816,18 @@ ARC3_API void arc3_set_trigger(int h, int on) {
 ARC3_API void arc3_set_forget(int h, int mode) {
   if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
   g_agents[h]->forget_mode = mode;
+}
+
+// How long a solution may be and still be replayed on the next level; 0 turns
+// the whole idea off, so it can be measured rather than argued about.
+ARC3_API void arc3_set_handover(int h, int n) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->handover = n;
+}
+
+ARC3_API void arc3_set_replay(int h, int cap) {
+  if (h < 0 || h >= int(g_agents.size()) || !g_agents[h]) return;
+  g_agents[h]->replay_cap = cap;
 }
 
 ARC3_API void arc3_set_depth(int h, int cap) {
