@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -3075,6 +3076,1035 @@ std::vector<Agent*> g_agents;
 }  // namespace
 
 #ifdef ARC3_WITH_LUA
+// ---- begin arc3_lua.h ----
+// A game the LLM can play, expressed as a Lua library.
+//
+// The problem this solves is not "call C++ from Lua" - that part is easy - but
+// the shape of a turn. The agent is driven from outside: Python owns the ARC
+// environment, asks us for one action, applies it, and comes back with the new
+// frame. A policy written as a script wants the opposite shape: it wants to say
+// press(3), look at what happened, and carry on, as a person would.
+//
+// Lua coroutines join the two. The script runs inside a coroutine; press() and
+// click() are C functions that lua_yield the action they were asked for; the
+// host returns it, steps the game, and resumes the coroutine with the new
+// board. The script never learns it was suspended. This is the one place where
+// the choice of Lua over Python pays a concrete debt - the same trick with
+// Python generators needs the interpreter's frame machinery, where here it is
+// two calls.
+//
+// Included from arc3_core.cpp, after Grid / Box / components() / detect_scale().
+
+#ifndef ARC3_LUA_H
+#define ARC3_LUA_H
+
+extern "C" {
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+}
+
+#include <chrono>
+#include <cstdlib>
+#include <map>
+#include <string>
+#include <vector>
+
+// ---- begin arc3_shapes.h ----
+// Shapes, and which of them fit which gaps.
+//
+// The user's first observation about this whole family of games, made before
+// any of this was built: "ほとんどは色合わせというか位置合わせ。どれとどれの位置を
+// 合わせるのか" - most of them are matching, and the question is which thing goes
+// with which. The 27B said the same thing unprompted about cd82: move the G
+// object to align with the - object.
+//
+// So that question should cost one lookup and not an afternoon of the model
+// counting characters in an ASCII board. Everything here is a pure function of
+// the current frame: it spends no actions, and actions are the only thing the
+// score charges for.
+//
+// Included from arc3_lua.h, after Grid / background_colors().
+
+#ifndef ARC3_SHAPES_H
+#define ARC3_SHAPES_H
+
+#include <algorithm>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace arc3lua {
+
+struct Piece {
+  int colour = 0, area = 0;
+  int cx = 0, cy = 0, w = 0, h = 0, minx = 0, miny = 0;
+  bool background = false;
+  std::string key;       // the shape, normalised to its bounding box
+};
+
+// Every 4-connected region of one colour, background included.
+//
+// components() in the core skips background colours, which is right when you
+// are looking for things to click and wrong when you are looking for the hole
+// a thing fits into. A hole is made of background by definition.
+inline std::vector<Piece> pieces(const Grid& g, int scale) {
+  const int bw = W / scale, bh = H / scale;
+  std::set<int> bg = background_colors(g);
+  std::vector<uint8_t> seen(size_t(bw) * size_t(bh), 0);
+  std::vector<Piece> out;
+
+  std::vector<int> stack, cells;
+  for (int y0 = 0; y0 < bh; ++y0) {
+    for (int x0 = 0; x0 < bw; ++x0) {
+      size_t start = size_t(y0) * size_t(bw) + size_t(x0);
+      if (seen[start]) continue;
+      int col = int(g.at(x0 * scale, y0 * scale));
+      seen[start] = 1;
+      stack.clear();
+      cells.clear();
+      stack.push_back(int(start));
+      while (!stack.empty()) {
+        int cur = stack.back();
+        stack.pop_back();
+        cells.push_back(cur);
+        int cx = cur % bw, cy = cur / bw;
+        const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+        for (int d = 0; d < 4; ++d) {
+          int nx = cx + dx[d], ny = cy + dy[d];
+          if (nx < 0 || ny < 0 || nx >= bw || ny >= bh) continue;
+          size_t ni = size_t(ny) * size_t(bw) + size_t(nx);
+          if (seen[ni]) continue;
+          if (int(g.at(nx * scale, ny * scale)) != col) continue;
+          seen[ni] = 1;
+          stack.push_back(int(ni));
+        }
+      }
+      if (cells.size() > size_t(bw) * size_t(bh) / 4) continue;   // scenery
+
+      Piece p;
+      p.colour = col;
+      p.background = bg.count(col) != 0;
+      p.area = int(cells.size());
+      int mnx = bw, mny = bh, mxx = -1, mxy = -1;
+      for (size_t i = 0; i < cells.size(); ++i) {
+        int cx = cells[i] % bw, cy = cells[i] / bw;
+        mnx = std::min(mnx, cx); mxx = std::max(mxx, cx);
+        mny = std::min(mny, cy); mxy = std::max(mxy, cy);
+      }
+      p.minx = mnx; p.miny = mny;
+      p.w = mxx - mnx + 1; p.h = mxy - mny + 1;
+      p.cx = (mnx + mxx) / 2; p.cy = (mny + mxy) / 2;
+
+      // The shape itself, as a row-major bitmap of the bounding box. Two
+      // things match when this string matches, whatever their colour or
+      // where they are.
+      std::string key(size_t(p.w) * size_t(p.h), '.');
+      for (size_t i = 0; i < cells.size(); ++i) {
+        int cx = cells[i] % bw - mnx, cy = cells[i] / bw - mny;
+        key[size_t(cy) * size_t(p.w) + size_t(cx)] = '#';
+      }
+      p.key = key;
+      out.push_back(p);
+    }
+  }
+  return out;
+}
+
+struct Match {
+  const Piece* thing;
+  const Piece* gap;
+};
+
+// Pairs of the same shape where one is made of background and the other is not:
+// a piece and a hole it would fill.
+inline std::vector<Match> fits(const std::vector<Piece>& ps, size_t limit = 12) {
+  std::vector<Match> out;
+  for (size_t i = 0; i < ps.size() && out.size() < limit; ++i) {
+    if (ps[i].background || ps[i].area < 2) continue;
+    for (size_t j = 0; j < ps.size(); ++j) {
+      if (!ps[j].background || ps[j].key != ps[i].key) continue;
+      if (ps[j].cx == ps[i].cx && ps[j].cy == ps[i].cy) continue;
+      Match m;
+      m.thing = &ps[i];
+      m.gap = &ps[j];
+      out.push_back(m);
+      break;
+    }
+  }
+  return out;
+}
+
+// Groups of two or more identical shapes, and the one that breaks the pattern.
+inline std::map<std::string, std::vector<const Piece*> >
+group_by_shape(const std::vector<Piece>& ps) {
+  std::map<std::string, std::vector<const Piece*> > by;
+  for (size_t i = 0; i < ps.size(); ++i)
+    if (!ps[i].background && ps[i].area >= 2)
+      by[ps[i].key].push_back(&ps[i]);
+  return by;
+}
+
+}  // namespace arc3lua
+
+#endif
+// ---- end arc3_shapes.h ----
+
+namespace arc3lua {
+
+
+// The glyph table is the one view_game.py prints, so a board in a prompt and a
+// board in a log are the same text. Nothing about the model depends on it, but
+// everything about reading its answers does.
+static const char* GLYPH = ".:-=+*#%@ABCDEFG";
+
+inline char glyph_of(int colour) { return GLYPH[((colour % 16) + 16) % 16]; }
+
+struct Event {
+  const char* kind;     // "moved" | "appeared" | "vanished" | "recoloured"
+  int colour, area;
+  int fx, fy, tx, ty;
+};
+
+// How far a thing may travel in one action and still be called the same thing.
+// Without a cap the matcher pairs objects across the whole board: on a level
+// with a dozen identical 4-cell shapes it reports a chain of impossible
+// journeys, each object "moving" to where the next one already was. Something
+// that far away is not evidence of a move, it is evidence of two objects.
+constexpr int MAX_MOVE = 5;
+
+struct Thing {
+  int colour, area, cx, cy, w, h, minx, miny;
+};
+
+inline std::vector<Thing> things_of(const Grid& g, int scale) {
+  std::set<int> bg = background_colors(g);
+  std::vector<int> cols;
+  std::vector<Box> comps = components(g, bg, &cols);
+  std::vector<Thing> out;
+  out.reserve(comps.size());
+  for (size_t i = 0; i < comps.size(); ++i) {
+    const Box& b = comps[i];
+    Thing t;
+    t.colour = (i < cols.size()) ? cols[i] : 0;
+    t.area = b.area / (scale * scale ? scale * scale : 1);
+    if (t.area <= 0) t.area = 1;
+    t.cx = b.cx() / scale;
+    t.cy = b.cy() / scale;
+    t.w = (b.w() + scale - 1) / scale;
+    t.h = (b.h() + scale - 1) / scale;
+    t.minx = b.minx / scale;
+    t.miny = b.miny / scale;
+    out.push_back(t);
+  }
+  return out;
+}
+
+// Describe a step as things happening to objects rather than as cells flipping.
+//
+// This is not a nicety. The same 27B, shown the same board and the same action,
+// answers "change (6,9) to F" when handed a list of changed cells and "the
+// player controls the F object at (6,10)" when handed this. A model reasons in
+// the vocabulary it is given, so the matching is done here, where the board is,
+// and the script is handed the result instead of the evidence for it.
+inline std::vector<Event> diff_things(const std::vector<Thing>& before,
+                                      const std::vector<Thing>& after) {
+  std::vector<Event> out;
+  std::vector<char> used(after.size(), 0);
+  for (size_t i = 0; i < before.size(); ++i) {
+    const Thing& b = before[i];
+    int best = -1, bestd = 1 << 30;
+    for (size_t j = 0; j < after.size(); ++j) {
+      if (used[j] || after[j].colour != b.colour) continue;
+      if (std::abs(after[j].area - b.area) * 4 > std::max(b.area, 1)) continue;
+      int d = std::abs(after[j].cx - b.cx) + std::abs(after[j].cy - b.cy);
+      if (d < bestd && d <= MAX_MOVE) { best = int(j); bestd = d; }
+    }
+    if (best < 0) {
+      Event e = {"vanished", b.colour, b.area, b.cx, b.cy, b.cx, b.cy};
+      out.push_back(e);
+      continue;
+    }
+    used[best] = 1;
+    const Thing& a = after[best];
+    if (a.cx != b.cx || a.cy != b.cy) {
+      Event e = {"moved", b.colour, b.area, b.cx, b.cy, a.cx, a.cy};
+      out.push_back(e);
+    }
+  }
+  for (size_t j = 0; j < after.size(); ++j)
+    if (!used[j]) {
+      const Thing& a = after[j];
+      Event e = {"appeared", a.colour, a.area, a.cx, a.cy, a.cx, a.cy};
+      out.push_back(e);
+    }
+  return out;
+}
+
+// The board as a person would read it: one character per logical cell, with
+// rulers, the way a go or shogi diagram is written. The 64x64 frame is a
+// rendering - several pixels per cell with furniture around it - so printing it
+// raw is unreadable and, worse, puts coordinates in the answer that no action
+// can use.
+inline std::string board_text(const Grid& g, int scale) {
+  int w = W / scale, h = H / scale;
+  std::string s;
+  s.reserve(size_t(h + 3) * size_t(w + 6));
+  s += "    ";
+  for (int x = 0; x < w; ++x) s += char('0' + (x / 10) % 10);
+  s += "\n    ";
+  for (int x = 0; x < w; ++x) s += char('0' + x % 10);
+  s += '\n';
+  char buf[8];
+  for (int y = 0; y < h; ++y) {
+    std::snprintf(buf, sizeof buf, "%3d ", y);
+    s += buf;
+    for (int x = 0; x < w; ++x) s += glyph_of(g.at(x * scale, y * scale));
+    s += '\n';
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+
+struct Host;
+Host* host_of(lua_State* L);
+
+struct Host {
+  lua_State* L = nullptr;
+  lua_State* co = nullptr;      // the coroutine the policy runs in
+  bool finished = false;
+  std::string error;            // non-empty once the script has failed
+
+  Grid cur, prev;
+  int scale = 1;
+  int level = 0, steps = 0, state = 1;
+
+  // What ended the last level, kept in words for the next one.
+  //
+  // This is the whole of the human advantage on these games. The baselines for
+  // lp85 are 17, 38, 31, 16, 41, 60, 26, 159 - level one is where a person
+  // learns the rule and every later level is cheap because they still know it.
+  // The agent threw that away each time a level ended, and paid the first
+  // level's price again and again.
+  std::string won_by;
+  int level_seen = 0;
+
+  // The actions of the level being played, and of the one before it.
+  //
+  // A person who has just worked out lp85's first level does not work it out
+  // again for the second: the baselines are 17, 38, 31, 16, 41, 60, 26, 159 and
+  // the later ones are cheap because the rule is known. The agent threw this
+  // away every time a level ended and paid the first level's price again.
+  std::vector<Act> this_level, last_level;
+  size_t replay_i = 0;
+  std::vector<int> avail;
+  std::vector<Thing> cur_things, prev_things;
+  std::string log;
+
+  // set by press/click just before they yield
+  int want_a = 0, want_x = 0, want_y = 0;
+  int last_a = 0;               // what the host actually applied
+
+  // What the host has worked out for itself, so the script need not.
+  int av_colour = -1, av_area = -1;          // the avatar, once something moved
+  std::map<int, Vec> button;                 // button -> the step it takes
+  std::vector<uint8_t> blocked;              // logical cells we failed to enter
+  std::map<int, int> wall_hits;              // colour -> times it stopped us
+  int wall_after = 1;                        // how many times before we believe it
+  int bw = 0, bh = 0;
+
+  // move_to state, carried across the yields it makes
+  int mv_tx = 0, mv_ty = 0, mv_left = 0;
+  size_t calib = 0;   // which button move_to is still trying out
+
+  // How long one stretch of thinking may take before it counts as a loop.
+  int think_seconds = 5;
+  std::chrono::steady_clock::time_point deadline;
+
+  // The tabular policy, available to the script as explore().
+  Agent* tab = nullptr;
+  int tab_left = 0;
+
+  ~Host() { if (L) lua_close(L); delete tab; }
+};
+
+// Learn the two things a walking game never tells you: which shape is you, and
+// which buttons move it where.
+//
+// Both are free. The host already computes the object-level diff for changes(),
+// so the sprite that moved under a button IS the avatar and the displacement IS
+// what that button does. And when a button with a known step leaves the avatar
+// where it was, the cell it was aimed at is a wall - which is the one fact a
+// script written by a language model never keeps, and the reason the first one
+// bounced off the same wall for twelve hundred actions.
+inline void learn(Host& hs) {
+  if (hs.last_a < 1 || hs.last_a > 5) return;
+  std::vector<Event> ev = diff_things(hs.prev_things, hs.cur_things);
+  for (size_t i = 0; i < ev.size(); ++i) {
+    if (std::strcmp(ev[i].kind, "moved") != 0) continue;
+    if (hs.av_colour >= 0 && ev[i].colour != hs.av_colour) continue;
+    hs.av_colour = ev[i].colour;
+    hs.av_area = ev[i].area;
+    hs.button[hs.last_a] = Vec(ev[i].tx - ev[i].fx, ev[i].ty - ev[i].fy);
+    return;
+  }
+  // nothing moved: if we know what this button does, we just met a wall
+  std::map<int, Vec>::const_iterator it = hs.button.find(hs.last_a);
+  if (it == hs.button.end() || hs.av_colour < 0) return;
+  for (size_t i = 0; i < hs.prev_things.size(); ++i) {
+    const Thing& t = hs.prev_things[i];
+    if (t.colour != hs.av_colour || t.area != hs.av_area) continue;
+    int nx = t.cx + it->second.dx, ny = t.cy + it->second.dy;
+    if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) return;
+    hs.blocked[size_t(ny) * size_t(hs.bw) + size_t(nx)] = 1;
+    // Generalise from the one cell to its colour - but only after it has
+    // stopped us `wall_after` times.
+    //
+    // Remembering only the square we bumped into means learning a wall a square
+    // at a time: on ka59 that was eighty actions to discover four cells of one
+    // barrier. Believing a colour on the strength of a single bump is the
+    // opposite error, and it is the worse one: across all 25 games it made
+    // every route look impossible and the policy gave up inside twenty actions
+    // everywhere. How many bumps it should take is a number, so it is measured
+    // (ARC3_WALL_AFTER) rather than argued about.
+    ++hs.wall_hits[int(hs.cur.at(nx * hs.scale, ny * hs.scale))];
+    return;
+  }
+}
+
+inline const Thing* avatar(const Host& hs) {
+  for (size_t i = 0; i < hs.cur_things.size(); ++i)
+    if (hs.cur_things[i].colour == hs.av_colour && hs.cur_things[i].area == hs.av_area)
+      return &hs.cur_things[i];
+  return nullptr;
+}
+
+// The first button of a shortest route to (tx,ty), or 0 if there is none.
+//
+// This is the whole argument for putting primitives in C++ rather than letting
+// the model write its own loop. The score is (human actions / ours) squared, so
+// a route that wanders is not merely inelegant, it is most of the score. A
+// breadth-first search over the steps we have learned, avoiding the walls we
+// have hit, is optimal for the map we know - and it costs the script one line.
+inline int first_step_towards(const Host& hs, int tx, int ty) {
+  const Thing* me = avatar(hs);
+  if (!me || hs.button.empty() || hs.bw <= 0) return 0;
+  if (me->cx == tx && me->cy == ty) return 0;
+
+  const size_t n = size_t(hs.bw) * size_t(hs.bh);
+  std::vector<int> first(n, -1);
+  std::vector<uint8_t> seen(n, 0);
+  std::vector<int> q;
+  q.reserve(n);
+  size_t start = size_t(me->cy) * size_t(hs.bw) + size_t(me->cx);
+  seen[start] = 1;
+  q.push_back(int(start));
+
+  for (size_t qi = 0; qi < q.size(); ++qi) {
+    int cur = q[qi];
+    int cx = cur % hs.bw, cy = cur / hs.bw;
+    for (std::map<int, Vec>::const_iterator it = hs.button.begin();
+         it != hs.button.end(); ++it) {
+      int nx = cx + it->second.dx, ny = cy + it->second.dy;
+      if (nx < 0 || ny < 0 || nx >= hs.bw || ny >= hs.bh) continue;
+      size_t ni = size_t(ny) * size_t(hs.bw) + size_t(nx);
+      if (seen[ni] || hs.blocked[ni]) continue;
+      if (!(nx == tx && ny == ty)) {
+        std::map<int, int>::const_iterator w =
+            hs.wall_hits.find(int(hs.cur.at(nx * hs.scale, ny * hs.scale)));
+        if (w != hs.wall_hits.end() && w->second >= hs.wall_after) continue;
+      }
+      seen[ni] = 1;
+      first[ni] = (cur == int(start)) ? it->first : first[size_t(cur)];
+      q.push_back(int(ni));
+    }
+  }
+
+  // The exact square may be unreachable - it is often the target object itself,
+  // which is solid. Walking to the nearest square we can reach is what a person
+  // would do, and refusing to move is what the first version did: the model
+  // asked for three places in a row, was told "no route" three times, and had
+  // nothing left to try.
+  int best = -1, bestd = 1 << 30;
+  for (size_t i = 0; i < n; ++i) {
+    if (!seen[i] || first[i] < 0) continue;
+    int d = std::abs(int(i) % hs.bw - tx) + std::abs(int(i) / hs.bw - ty);
+    if (d < bestd) { bestd = d; best = int(i); }
+  }
+  if (best < 0) return 0;
+  int here = std::abs(me->cx - tx) + std::abs(me->cy - ty);
+  return bestd < here ? first[size_t(best)] : 0;
+}
+
+inline void push_thing(lua_State* L, const Thing& t) {
+  lua_newtable(L);
+  lua_pushinteger(L, t.cx);     lua_setfield(L, -2, "x");
+  lua_pushinteger(L, t.cy);     lua_setfield(L, -2, "y");
+  lua_pushinteger(L, t.colour); lua_setfield(L, -2, "colour");
+  lua_pushinteger(L, t.area);   lua_setfield(L, -2, "area");
+  lua_pushinteger(L, t.w);      lua_setfield(L, -2, "w");
+  lua_pushinteger(L, t.h);      lua_setfield(L, -2, "h");
+  lua_pushinteger(L, t.minx);   lua_setfield(L, -2, "minx");
+  lua_pushinteger(L, t.miny);   lua_setfield(L, -2, "miny");
+  char gl[2] = {glyph_of(t.colour), 0};
+  lua_pushstring(L, gl);        lua_setfield(L, -2, "glyph");
+}
+
+// --- the library ------------------------------------------------------------
+
+inline int l_objects(lua_State* L) {
+  Host* hs = host_of(L);
+  lua_newtable(L);
+  for (size_t i = 0; i < hs->cur_things.size(); ++i) {
+    push_thing(L, hs->cur_things[i]);
+    lua_rawseti(L, -2, int(i + 1));
+  }
+  return 1;
+}
+
+inline int l_changes(lua_State* L) {
+  Host* hs = host_of(L);
+  std::vector<Event> ev = diff_things(hs->prev_things, hs->cur_things);
+  lua_newtable(L);
+  for (size_t i = 0; i < ev.size(); ++i) {
+    lua_newtable(L);
+    lua_pushstring(L, ev[i].kind);   lua_setfield(L, -2, "kind");
+    lua_pushinteger(L, ev[i].colour);lua_setfield(L, -2, "colour");
+    lua_pushinteger(L, ev[i].area);  lua_setfield(L, -2, "area");
+    lua_pushinteger(L, ev[i].fx);    lua_setfield(L, -2, "fx");
+    lua_pushinteger(L, ev[i].fy);    lua_setfield(L, -2, "fy");
+    lua_pushinteger(L, ev[i].tx);    lua_setfield(L, -2, "x");
+    lua_pushinteger(L, ev[i].ty);    lua_setfield(L, -2, "y");
+    lua_pushinteger(L, ev[i].tx - ev[i].fx); lua_setfield(L, -2, "dx");
+    lua_pushinteger(L, ev[i].ty - ev[i].fy); lua_setfield(L, -2, "dy");
+    lua_rawseti(L, -2, int(i + 1));
+  }
+  return 1;
+}
+
+inline int l_board_text(lua_State* L) {
+  Host* hs = host_of(L);
+  std::string s = board_text(hs->cur, hs->scale);
+  lua_pushlstring(L, s.data(), s.size());
+  return 1;
+}
+
+inline int l_at(lua_State* L) {
+  Host* hs = host_of(L);
+  int x = int(luaL_checkinteger(L, 1)), y = int(luaL_checkinteger(L, 2));
+  int w = W / hs->scale, h = H / hs->scale;
+  if (x < 0 || y < 0 || x >= w || y >= h) { lua_pushnil(L); return 1; }
+  lua_pushinteger(L, hs->cur.at(x * hs->scale, y * hs->scale));
+  return 1;
+}
+
+inline int l_size(lua_State* L) {
+  Host* hs = host_of(L);
+  lua_pushinteger(L, W / hs->scale);
+  lua_pushinteger(L, H / hs->scale);
+  return 2;
+}
+
+inline int l_level(lua_State* L) { lua_pushinteger(L, host_of(L)->level); return 1; }
+inline int l_steps(lua_State* L) { lua_pushinteger(L, host_of(L)->steps); return 1; }
+
+inline int l_actions(lua_State* L) {
+  Host* hs = host_of(L);
+  lua_newtable(L);
+  for (size_t i = 0; i < hs->avail.size(); ++i) {
+    lua_pushinteger(L, hs->avail[i]);
+    lua_rawseti(L, -2, int(i + 1));
+  }
+  return 1;
+}
+
+inline int l_say(lua_State* L) {
+  Host* hs = host_of(L);
+  const char* s = luaL_optstring(L, 1, "");
+  hs->log += s;
+  hs->log += '\n';
+  return 0;
+}
+
+// press/click/reset: hand the action to the host and suspend.
+//
+// The continuation does the bookkeeping the script would otherwise have to do
+// itself - it reports whether the board actually changed, which is the one
+// question worth asking after every action and the thing the tabular policy
+// spends its whole life measuring.
+inline int act_resume(lua_State* L, int, lua_KContext) {
+  Host* hs = host_of(L);
+  lua_pushboolean(L, !(hs->cur == hs->prev));
+  return 1;
+}
+
+inline int l_press(lua_State* L) {
+  Host* hs = host_of(L);
+  int n = int(luaL_checkinteger(L, 1));
+  luaL_argcheck(L, n >= 1 && n <= 5, 1, "button is 1..5");
+  hs->want_a = n; hs->want_x = 0; hs->want_y = 0;
+  return lua_yieldk(L, 0, 0, act_resume);
+}
+
+inline int l_click(lua_State* L) {
+  Host* hs = host_of(L);
+  hs->want_a = A6;
+  hs->want_x = int(luaL_checkinteger(L, 1)) * hs->scale;
+  hs->want_y = int(luaL_checkinteger(L, 2)) * hs->scale;
+  return lua_yieldk(L, 0, 0, act_resume);
+}
+
+// move_to(x, y [, limit]) - walk there, however many actions that takes.
+//
+// One Lua call, many yields: the continuation re-enters the same decision, so
+// the script says where it wants to be and the host spends the actions. This is
+// the shape every primitive here should have. A model is good at deciding where
+// to go and bad at not bouncing off a wall on the way.
+int move_drive(lua_State* L);
+
+inline int move_cont(lua_State* L, int, lua_KContext) { return move_drive(L); }
+
+inline int move_drive(lua_State* L) {
+  Host* hs = host_of(L);
+
+  // Learn the buttons if nobody has. move_to cannot plan a route without
+  // knowing what a button does, and the host cannot know until something has
+  // been pressed - so the first version returned false having spent nothing,
+  // and a perfectly sensible script said "could not reach" and stopped. A
+  // person in that position presses each button once. So does this.
+  if (hs->button.empty() && hs->calib < hs->avail.size()) {
+    while (hs->calib < hs->avail.size()) {
+      int a = hs->avail[hs->calib++];
+      if (a >= A1 && a <= A5) {
+        hs->want_a = a; hs->want_x = 0; hs->want_y = 0;
+        return lua_yieldk(L, 0, 0, move_cont);
+      }
+    }
+  }
+
+  const Thing* me = avatar(*hs);
+  if (me && me->cx == hs->mv_tx && me->cy == hs->mv_ty) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  int b = (hs->mv_left-- > 0) ? first_step_towards(*hs, hs->mv_tx, hs->mv_ty) : 0;
+  if (b == 0) {
+    lua_pushboolean(L, 0);        // no route we know of, or out of patience
+    return 1;
+  }
+  hs->want_a = b; hs->want_x = 0; hs->want_y = 0;
+  return lua_yieldk(L, 0, 0, move_cont);
+}
+
+inline int l_move_to(lua_State* L) {
+  Host* hs = host_of(L);
+  hs->mv_tx = int(luaL_checkinteger(L, 1));
+  hs->mv_ty = int(luaL_checkinteger(L, 2));
+  hs->mv_left = int(luaL_optinteger(L, 3, 200));
+  return move_drive(L);
+}
+
+// Who the host thinks you are, and what it has learned the buttons do.
+inline int l_me(lua_State* L) {
+  Host* hs = host_of(L);
+  const Thing* me = avatar(*hs);
+  if (!me) { lua_pushnil(L); return 1; }
+  push_thing(L, *me);
+  return 1;
+}
+
+inline int l_walls(lua_State* L) {
+  Host* hs = host_of(L);
+  lua_newtable(L);
+  int k = 0;
+  for (int y = 0; y < hs->bh; ++y)
+    for (int x = 0; x < hs->bw; ++x)
+      if (hs->blocked[size_t(y) * size_t(hs->bw) + size_t(x)]) {
+        lua_newtable(L);
+        lua_pushinteger(L, x); lua_setfield(L, -2, "x");
+        lua_pushinteger(L, y); lua_setfield(L, -2, "y");
+        lua_rawseti(L, -2, ++k);
+      }
+  return 1;
+}
+
+inline int env_int(const char* name, int fallback) {
+  const char* v = std::getenv(name);
+  return v && *v ? atoi(v) : fallback;
+}
+
+// explore(n) - hand the next n actions to the policy that actually wins.
+//
+// The scripted agent had, at this point, won nothing: neither a policy written
+// by hand nor four written by the model finished a single level of the
+// twenty-five, while the tabular counter policy finishes twelve. Arguing that
+// the script ought to do better is not a plan. Letting it call the thing that
+// works is: the model can then write "explore until something happens, then
+// walk there", which is a strategy neither half can express alone.
+int explore_drive(lua_State* L);
+
+inline int explore_cont(lua_State* L, int, lua_KContext) { return explore_drive(L); }
+
+inline int explore_drive(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->tab_left-- <= 0) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  // The real state code, not a constant. The tabular policy is told the
+  // state and returns RESET itself when that is the only legal action; handed
+  // a hardcoded 1 it never learns the game ended, and every action after the
+  // first GAME_OVER is thrown away. That alone took it from twelve levels to
+  // one.
+  hs->tab->observe(hs->cur.c.data(), hs->level, hs->state);
+  int a = hs->tab->choose();
+  hs->want_a = a;
+  hs->want_x = hs->tab->pending_x;
+  hs->want_y = hs->tab->pending_y;
+  return lua_yieldk(L, 0, 0, explore_cont);
+}
+
+inline int l_explore(lua_State* L) {
+  Host* hs = host_of(L);
+  if (!hs->tab) {
+    hs->tab = new Agent();
+    std::vector<int> av = hs->avail;
+    if (av.empty()) av.push_back(A1);
+    hs->tab->init(av.data(), int(av.size()));
+
+    // Apply the settings the submitted agent applies, or this is not the
+    // policy that wins.
+    //
+    // The constructor's defaults are explore_mode 2 and alpha_grid 8, which is
+    // an older policy sweeping 256 points of bare board. agent_template.py
+    // overrides both from the environment and never runs those defaults, so
+    // nothing had noticed. Creating the Agent directly ran them, and explore()
+    // was measured for an afternoon as a weaker agent wearing mode 8's name:
+    // 2 games of 8, against 8 of 8 for the real thing.
+    hs->tab->explore_mode = env_int("ARC3_EXPLORE", 8);
+    hs->tab->alpha_objects = env_int("ARC3_ALPHA_OBJ", 24);
+    hs->tab->alpha_grid = env_int("ARC3_ALPHA_GRID", 0);
+    hs->tab->depth_cap = env_int("ARC3_DEPTH", 12);
+    hs->tab->budget = env_int("ARC3_BUDGET", 1 << 28);
+  }
+  hs->tab_left = int(luaL_optinteger(L, 1, 50));
+  return explore_drive(L);
+}
+
+int replay_drive(lua_State* L);
+
+inline int replay_cont(lua_State* L, int, lua_KContext) { return replay_drive(L); }
+
+inline int replay_drive(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->replay_i >= hs->last_level.size()) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  const Act& a = hs->last_level[hs->replay_i++];
+  hs->want_a = a.a; hs->want_x = a.x; hs->want_y = a.y;
+  return lua_yieldk(L, 0, 0, replay_cont);
+}
+
+// replay() - do again whatever finished the previous level.
+//
+// These games repeat one rule across their levels, which is why a person's
+// action count falls after the first. Doing the same thing again is the
+// cheapest hypothesis there is, and if it is wrong it is wrong within a few
+// actions rather than a few hundred.
+inline int l_replay(lua_State* L) {
+  Host* hs = host_of(L);
+  if (hs->last_level.empty()) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  hs->replay_i = 0;
+  return replay_drive(L);
+}
+
+inline int l_reset(lua_State* L) {
+  Host* hs = host_of(L);
+  hs->want_a = A_RESET; hs->want_x = 0; hs->want_y = 0;
+  return lua_yieldk(L, 0, 0, act_resume);
+}
+
+// What to show the model between turns.
+//
+// Everything here is something the host worked out and the model would
+// otherwise have to rediscover by spending actions: which shape it controls,
+// what each button does, which colours have stopped it. Handing this over is
+// the difference between asking the model to play and asking it to guess.
+inline std::string chr10() { return std::string(1, char(10)); }
+
+inline std::string state_text(Host& hs) {
+  char buf[256];
+  std::string s;
+  std::snprintf(buf, sizeof buf, "level=%d actions_used=%d board=%dx%d\n",
+                hs.level, hs.steps, hs.bw, hs.bh);
+  s += buf;
+
+  const Thing* me = avatar(hs);
+  if (me) {
+    std::snprintf(buf, sizeof buf,
+                  "you control: the '%c' object of %d cells, now at (%d,%d)\n",
+                  glyph_of(me->colour), me->area, me->cx, me->cy);
+    s += buf;
+  } else {
+    s += "you control: not known yet - press each button once and it will be\n";
+  }
+
+  if (!hs.button.empty()) {
+    s += "buttons:";
+    for (std::map<int, Vec>::const_iterator it = hs.button.begin();
+         it != hs.button.end(); ++it) {
+      std::snprintf(buf, sizeof buf, " %d moves you (%+d,%+d)", it->first,
+                    it->second.dx, it->second.dy);
+      s += buf;
+    }
+    s += "\n";
+  }
+
+  if (!hs.wall_hits.empty()) {
+    s += "colours that stopped you:";
+    for (std::map<int, int>::const_iterator it = hs.wall_hits.begin();
+         it != hs.wall_hits.end(); ++it) {
+      std::snprintf(buf, sizeof buf, " '%c' x%d", glyph_of(it->first), it->second);
+      s += buf;
+    }
+    s += "\n";
+  }
+
+  // The picture as well as the list.
+  //
+  // It was taken out because a model shown both counted columns in the ASCII by
+  // hand and argued with the object list. But a plan through a room needs to
+  // know where the walls are, and a list of centroids does not say that. The
+  // list stays authoritative for positions and says so; the picture is there to
+  // be looked at.
+  if (!hs.won_by.empty()) {
+    s += "what ended a level before: " + hs.won_by + chr10();
+  }
+  s += "the board (one character per cell, rulers count from 0):\n";
+  s += board_text(hs.cur, hs.scale);
+  s += "positions above are only a picture; the list below is exact:\n";
+  // Which piece fits which hole, and which shape occurs more than once.
+  //
+  // The user said on the first day that these games are mostly matching, and
+  // the model said the same of cd82 unprompted. Making it read that off an
+  // ASCII board costs it attention it does not have to spare; computing it
+  // here costs no actions at all.
+  {
+    std::vector<Piece> ps = pieces(hs.cur, hs.scale);
+    std::vector<Match> ms = fits(ps);
+    if (!ms.empty()) {
+      s += "shapes that fit a gap somewhere else:\n";
+      for (size_t k = 0; k < ms.size(); ++k) {
+        std::snprintf(buf, sizeof buf,
+                      "  the '%c' shape %dx%d at (%d,%d) is the same shape as the gap at (%d,%d)\n",
+                      glyph_of(ms[k].thing->colour), ms[k].thing->w,
+                      ms[k].thing->h, ms[k].thing->cx, ms[k].thing->cy,
+                      ms[k].gap->cx, ms[k].gap->cy);
+        s += buf;
+      }
+    }
+    std::map<std::string, std::vector<const Piece*> > by = group_by_shape(ps);
+    int shown = 0;
+    for (std::map<std::string, std::vector<const Piece*> >::const_iterator it =
+             by.begin(); it != by.end() && shown < 6; ++it) {
+      if (it->second.size() < 2) continue;
+      if (shown == 0) s += "shapes that occur more than once:\n";
+      ++shown;
+      std::snprintf(buf, sizeof buf, "  %dx%d shape, %d of them:",
+                    it->second[0]->w, it->second[0]->h, int(it->second.size()));
+      s += buf;
+      for (size_t k = 0; k < it->second.size() && k < 8; ++k) {
+        std::snprintf(buf, sizeof buf, " '%c'(%d,%d)", glyph_of(it->second[k]->colour),
+                      it->second[k]->cx, it->second[k]->cy);
+        s += buf;
+      }
+      s += "\n";
+    }
+  }
+
+  s += "objects now:\n";
+  for (size_t k = 0; k < hs.cur_things.size() && k < 40; ++k) {
+    const Thing& t = hs.cur_things[k];
+    std::snprintf(buf, sizeof buf, "  '%c' area %d at (%d,%d) box %dx%d\n",
+                  glyph_of(t.colour), t.area, t.cx, t.cy, t.w, t.h);
+    s += buf;
+  }
+  if (hs.cur_things.size() > 40) s += "  ...\n";
+  return s;
+}
+
+// --- the state -------------------------------------------------------------
+
+static const char* HOST_KEY = "arc3.host";
+
+inline Host* host_of(lua_State* L) {
+  lua_getfield(L, LUA_REGISTRYINDEX, HOST_KEY);
+  Host* hs = static_cast<Host*>(lua_touserdata(L, -1));
+  lua_pop(L, 1);
+  return hs;
+}
+
+// Take away everything that touches the machine.
+//
+// This is the whole of the sandbox, and it is four lines because the globals of
+// a Lua state are an ordinary table that we own. The alternative - picking a
+// safe subset of a language whose modules import each other - is the work the
+// leading harness had to do by hand, and it is work that can be got wrong
+// quietly. Here what is missing is missing because nothing put it there.
+inline void seal(lua_State* L) {
+  static const char* gone[] = {"io", "os", "package", "require", "dofile",
+                               "loadfile", "load", "collectgarbage", "debug",
+                               nullptr};
+  for (int i = 0; gone[i]; ++i) {
+    lua_pushnil(L);
+    lua_setglobal(L, gone[i]);
+  }
+}
+
+inline void open_library(Host& hs) {
+  hs.L = luaL_newstate();
+  luaL_openlibs(hs.L);
+  seal(hs.L);
+
+  lua_pushlightuserdata(hs.L, &hs);
+  lua_setfield(hs.L, LUA_REGISTRYINDEX, HOST_KEY);
+
+  static const luaL_Reg api[] = {
+    {"objects",    l_objects},
+    {"changes",    l_changes},
+    {"board_text", l_board_text},
+    {"at",         l_at},
+    {"size",       l_size},
+    {"level",      l_level},
+    {"steps",      l_steps},
+    {"actions",    l_actions},
+    {"say",        l_say},
+    {"press",      l_press},
+    {"click",      l_click},
+    {"move_to",    l_move_to},
+    {"explore",    l_explore},
+    {"replay",     l_replay},
+    {"me",         l_me},
+    {"walls",      l_walls},
+    {"restart",    l_reset},
+    {nullptr, nullptr},
+  };
+  for (int i = 0; api[i].name; ++i) {
+    lua_pushcfunction(hs.L, api[i].func);
+    lua_setglobal(hs.L, api[i].name);
+  }
+}
+
+inline void observe(Host& hs, const Grid& g, int level, int state,
+                    const std::vector<int>& avail) {
+  hs.prev = hs.cur;
+  hs.prev_things = hs.cur_things;
+  hs.cur = g;
+  hs.level = level;
+  hs.state = state;
+  hs.avail = avail;
+  hs.scale = detect_scale(g);
+  if (hs.scale < 1) hs.scale = 1;
+  hs.cur_things = things_of(g, hs.scale);
+
+  // Notice the moment a level ends, and what ended it.
+  if (level > hs.level_seen) {
+    char b[192];
+    const char* what = "an action";
+    if (hs.last_a == A6) what = "a click";
+    else if (hs.last_a >= A1 && hs.last_a <= A5) what = "a button";
+    std::snprintf(b, sizeof b, "level %d was finished by %s (%d) at step %d",
+                  level, what, hs.last_a, hs.steps);
+    hs.won_by = b;
+    hs.level_seen = level;
+    hs.last_level = hs.this_level;
+    hs.this_level.clear();
+  }
+
+  int nw = W / hs.scale, nh = H / hs.scale;
+  if (nw != hs.bw || nh != hs.bh) {
+    hs.bw = nw; hs.bh = nh;
+    hs.blocked.assign(size_t(nw) * size_t(nh), 0);
+  }
+  learn(hs);
+}
+
+// Load the policy. Returns false and fills hs.error if it does not compile.
+inline bool start(Host& hs, const std::string& script) {
+  // A second call replaces the script but keeps everything the host has
+  // learned: the avatar, the buttons, the walls, the tabular policy's counters.
+  // That is the point of loading more than once - the model gets to see a few
+  // moves and write the next few, without the agent forgetting the game.
+  hs.finished = false;
+  hs.error.clear();
+  hs.co = lua_newthread(hs.L);
+  lua_setfield(hs.L, LUA_REGISTRYINDEX, "arc3.co");   // anchor against the GC
+  if (luaL_loadbuffer(hs.co, script.data(), script.size(), "policy") != LUA_OK) {
+    hs.error = lua_tostring(hs.co, -1) ? lua_tostring(hs.co, -1) : "load failed";
+    hs.finished = true;
+    return false;
+  }
+  return true;
+}
+
+enum { LUA_WANTS_ACTION = 1, LUA_DONE = 0, LUA_FAILED = -1 };
+
+// Stop a script that computes forever without ever acting.
+//
+// A model will eventually write `while true do ... end` with a condition that
+// nothing inside the loop can change, and then lua_resume never returns. One
+// such script burned a hundred minutes of processor and the whole eight-game
+// run produced nothing - and on the competition's machine it would quietly eat
+// the entire eight-hour session. A budget of VM instructions between actions
+// costs nothing and makes that failure a message instead of a hang.
+// Checked every this many VM instructions; the limit itself is in seconds,
+// because seconds are what the competition charges for and what a person means
+// by "too long". The leading harness gives its Python thirty seconds a call and
+// has to reach for a subprocess to enforce it - a running Python thread cannot
+// be interrupted from outside. Lua puts the hook in the VM, so it is this.
+constexpr int HOOK_EVERY = 200000;
+
+inline void think_too_long(lua_State* L, lua_Debug*) {
+  Host* hs = host_of(L);
+  if (std::chrono::steady_clock::now() < hs->deadline) return;
+  luaL_error(L, "the script ran for %d seconds without taking an action - it is "
+                "probably looping; act inside the loop, or stop", hs->think_seconds);
+}
+
+// Run the policy until it asks for an action, finishes, or breaks.
+inline int resume(Host& hs, int* out_a, int* out_x, int* out_y) {
+  if (hs.finished) return hs.error.empty() ? LUA_DONE : LUA_FAILED;
+  int nres = 0;
+  hs.deadline = std::chrono::steady_clock::now()
+              + std::chrono::seconds(hs.think_seconds);
+  lua_sethook(hs.co, think_too_long, LUA_MASKCOUNT, HOOK_EVERY);
+  int rc = lua_resume(hs.co, hs.L, 0, &nres);
+  lua_sethook(hs.co, nullptr, 0, 0);
+  if (rc == LUA_YIELD) {
+    *out_a = hs.want_a; *out_x = hs.want_x; *out_y = hs.want_y;
+    hs.last_a = hs.want_a;
+    hs.this_level.push_back(Act(hs.want_a, hs.want_x, hs.want_y));
+    ++hs.steps;
+    return LUA_WANTS_ACTION;
+  }
+  hs.finished = true;
+  if (rc != LUA_OK) {
+    const char* m = lua_tostring(hs.co, -1);
+    hs.error = m ? m : "runtime error";
+    return LUA_FAILED;
+  }
+  return LUA_DONE;
+}
+
+} // namespace arc3lua
+
+#endif
+// ---- end arc3_lua.h ----
 
 namespace {
 std::vector<arc3lua::Host*> g_lua;
@@ -4012,7 +5042,14 @@ def _build_core() -> ctypes.CDLL | None:
     if not src.strip() or src.startswith("__ARC3_CPP"):
         return None
 
-    tag = hashlib.sha1(src.encode()).hexdigest()[:12]
+    # If a Lua source tree is attached, build the scripted layer in as well.
+    #
+    # The competition notebook has no internet, so the interpreter cannot be
+    # installed - but it can be compiled, because it is C and it is small, and
+    # one extra translation unit is all it costs. Without it the agent is
+    # exactly what it was before: the tabular policy and nothing else.
+    lua_src = _find_lua()
+    tag = hashlib.sha1((src + (lua_src or "")).encode()).hexdigest()[:12]
     outdir = Path(os.environ.get("ARC3_BUILD_DIR", tempfile.gettempdir())) / "arc3"
     outdir.mkdir(parents=True, exist_ok=True)
     ext = ".dll" if sys.platform == "win32" else ".so"
@@ -4027,10 +5064,15 @@ def _build_core() -> ctypes.CDLL | None:
         # -pthread: the autograd engine parallelises convolutions over the
         # batch with std::thread, and on Linux that needs the flag at both
         # compile and link time or the threads fail at runtime.
-        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread"]
+        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread", "-w"]
         if sys.platform != "win32":
             cmd.append("-fPIC")
-        cmd += [str(cpp), "-o", str(tmp)]
+        cmd += [str(cpp)]
+        if lua_src:
+            one = outdir / f"lua_one_{tag}_{os.getpid()}.cpp"
+            one.write_text(_LUA_ONE, encoding="utf-8")
+            cmd += ["-DARC3_WITH_LUA", "-I", lua_src, str(one)]
+        cmd += ["-o", str(tmp)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
@@ -4043,7 +5085,7 @@ def _build_core() -> ctypes.CDLL | None:
                 # Someone else won the race; their build is byte-identical.
                 pass
         except Exception as e:  # g++ missing, timeout, ...
-            print(f"[arc3] cannot build core ({e}); falling back to Python", file=sys.stderr)
+            print(f"[arc3] cannot build core ({e}); falling back to Python", flush=True)
             return None
         finally:
             for f in (cpp, tmp):
@@ -4060,7 +5102,7 @@ def _build_core() -> ctypes.CDLL | None:
             private.write_bytes(lib.read_bytes())
         dll = ctypes.CDLL(str(private))
     except OSError as e:
-        print(f"[arc3] cannot load core ({e}); falling back to Python", file=sys.stderr)
+        print(f"[arc3] cannot load core ({e}); falling back to Python", flush=True)
         return None
 
     dll.arc3_new.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
@@ -4072,6 +5114,19 @@ def _build_core() -> ctypes.CDLL | None:
                                 ctypes.POINTER(ctypes.c_int)]
     dll.arc3_choose.restype = ctypes.c_int
     dll.arc3_stats.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    if hasattr(dll, "arc3_lua_new"):
+        dll.arc3_lua_new.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        dll.arc3_lua_new.restype = ctypes.c_int
+        dll.arc3_lua_load.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        dll.arc3_lua_load.restype = ctypes.c_int
+        dll.arc3_lua_observe.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int8),
+                                         ctypes.c_int, ctypes.c_int]
+        dll.arc3_lua_step.argtypes = [ctypes.c_int] + [ctypes.POINTER(ctypes.c_int)] * 3
+        dll.arc3_lua_step.restype = ctypes.c_int
+        dll.arc3_lua_state.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        dll.arc3_lua_state.restype = ctypes.c_int
+        dll.arc3_lua_drain.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        dll.arc3_lua_drain.restype = ctypes.c_int
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -4087,6 +5142,203 @@ def _build_core() -> ctypes.CDLL | None:
 
 _CORE: ctypes.CDLL | None = None
 _CORE_TRIED = False
+
+
+# Lua, as one translation unit. The list of .c files is spelled out because
+# Lua 5.4 does not ship an amalgamation, and the whole thing is wrapped in
+# extern "C" so a C++ build still produces the symbols the API declares.
+_LUA_ONE = r"""// Lua as one C++ translation unit.
+//
+// Our Kaggle notebook compiles a single embedded C++ string with g++ and loads
+// the result through ctypes; there is no build system and no second file. So
+// the question that matters is not "does Lua build" - it does, everywhere - but
+// "does the whole interpreter go into one .cpp with the C++ compiler we already
+// have there". That is what this file tests. Lua 5.4 does not ship onelua.c, so
+// the includes are listed by hand.
+extern "C" {
+#include "lprefix.h"
+}
+// C linkage for the whole interpreter. Compiling Lua as C++ mangles every
+// symbol, so a translation unit that declares the API the normal way -
+// extern "C", as lua.hpp does - fails to link against it. Wrapping the
+// includes fixes that and keeps Lua linkable from C as well.
+extern "C" {
+#define LUA_CORE
+#define LUA_LIB
+#define ltable_c
+#define lvm_c
+#include "lapi.c"
+#include "lcode.c"
+#include "lctype.c"
+#include "ldebug.c"
+#include "ldo.c"
+#include "ldump.c"
+#include "lfunc.c"
+#include "lgc.c"
+#include "llex.c"
+#include "lmem.c"
+#include "lobject.c"
+#include "lopcodes.c"
+#include "lparser.c"
+#include "lstate.c"
+#include "lstring.c"
+#include "ltable.c"
+#include "ltm.c"
+#include "lundump.c"
+#include "lvm.c"
+#include "lzio.c"
+#include "lauxlib.c"
+#include "lbaselib.c"
+#include "lcorolib.c"
+#include "ldblib.c"
+// io/os/loadlib are compiled in because linit.c refers to their luaopen_*.
+// Keeping them out of the sandbox is a runtime decision - clear the globals
+// after opening - not a compile-time one.
+#include "liolib.c"
+#include "loslib.c"
+#include "loadlib.c"
+#include "lmathlib.c"
+#include "lstrlib.c"
+#include "ltablib.c"
+#include "lutf8lib.c"
+#include "linit.c"
+}
+"""
+
+
+def _find_lua() -> str | None:
+    """The directory holding lua.h, if a Lua source tree is attached."""
+    import glob
+    for pat in ("/kaggle/input/**/lua-*/src/lua.h", "/kaggle/input/**/src/lua.h"):
+        hit = glob.glob(pat, recursive=True)
+        if hit:
+            return str(Path(hit[0]).parent)
+    env = os.environ.get("LUA_SRC")
+    if env and (Path(env) / "lua.h").exists():
+        return env
+    return None
+
+
+# ── the model, when one is attached ──────────────────────────────────────────
+#
+# Measured on Kaggle's two T4s with Qwen3.8-27B Q4_K_M: the weights load in
+# 1m52s, the prompt runs at 65 tokens a second and the answer at 13, so one
+# question costs about a minute. Eight hours buys roughly 480 of them across
+# all twenty-five games - about nineteen each. That is far fewer than the
+# leading harness gets, so each one has to buy a lot of actions: the model
+# writes a script, and the script plays.
+
+_LLM = {"url": None, "proc": None, "tried": False}
+
+
+def _llm_url() -> str | None:
+    """Start llama-server once, if its binaries and a model are attached."""
+    if _LLM["tried"]:
+        return _LLM["url"]
+    _LLM["tried"] = True
+    import glob, shutil, stat, urllib.request
+
+    env_url = os.environ.get("LLAMA_SERVER")
+    if env_url:
+        _LLM["url"] = env_url
+        return env_url
+
+    exe = glob.glob("/kaggle/input/**/llama-server", recursive=True)
+    gguf = sorted(glob.glob("/kaggle/input/**/*.gguf", recursive=True),
+                  key=os.path.getsize, reverse=True)
+    if not exe or not gguf:
+        print("[llm] no server or model attached; the tabular policy plays alone",
+              file=sys.stderr)
+        return None
+
+    run = Path(tempfile.gettempdir()) / "llamabin"
+    run.mkdir(exist_ok=True)
+    for f in Path(exe[0]).parent.iterdir():
+        if f.suffix != ".json":
+            shutil.copy2(f, run / f.name)
+    server = run / "llama-server"
+    server.chmod(server.stat().st_mode | stat.S_IEXEC)
+
+    env = dict(os.environ,
+               LD_LIBRARY_PATH=str(run) + ":" + os.environ.get("LD_LIBRARY_PATH", ""))
+    cmd = [str(server), "-m", gguf[0], "-ngl", "99", "--tensor-split", "1,1",
+           "-c", "24576", "-np", "4", "--host", "127.0.0.1", "--port", "8080",
+           "--jinja"]
+    log = open(str(Path(tempfile.gettempdir()) / "llama-server.log"), "w")
+    try:
+        _LLM["proc"] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                        env=env, cwd=str(run))
+    except Exception as e:
+        print(f"[llm] cannot start server: {e}", flush=True)
+        return None
+
+    for _ in range(240):
+        time.sleep(5)
+        if _LLM["proc"].poll() is not None:
+            print(f"[llm] server exited rc={_LLM['proc'].returncode}", flush=True)
+            return None
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=3) as r:
+                if b"ok" in r.read():
+                    _LLM["url"] = "http://127.0.0.1:8080"
+                    print("[llm] server up", flush=True)
+                    return _LLM["url"]
+        except Exception:
+            pass
+    print("[llm] server never came up", flush=True)
+    return None
+
+
+def _ask(prompt: str, n_predict: int = 500) -> str | None:
+    """One question. Returns None on any failure, and says so - a slow or
+    broken path that hides itself is worse than no path at all."""
+    url = _llm_url()
+    if not url:
+        return None
+    import json as _json, urllib.request
+    body = _json.dumps({
+        "messages": [
+            {"role": "system",
+             "content": "You write Lua. Reply with Lua source only: no markdown "
+                        "fence, no explanation."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": n_predict, "temperature": 0.2,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode("utf-8")
+    req = urllib.request.Request(url + "/v1/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return _json.load(r)["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[llm] call failed: {str(e)[:200]}", flush=True)
+        return None
+
+
+_LUA_START = re.compile(r"^\s*(--|local|for|while|if|function|repeat"
+                        r"|do|return|[A-Za-z_][A-Za-z_0-9]*\s*[=(])")
+
+
+def _only_lua(text: str) -> str:
+    """Take the program out of the answer.
+
+    Guessing where the code starts does not work. The model writes a sentence,
+    then the program, and the first line that looks like Lua is often the middle
+    of it - cut there and a function's opening is gone while its `end` remains,
+    which Lua reports as "<eof> expected near 'end'" and the turn is wasted.
+    Both of the first two attempts failed exactly that way.
+    So the prompt asks for a fence and this takes what is inside it. The old
+    guess stays as a fallback for an answer that arrives without one.
+    """
+    fence = "`" * 3
+    m = re.search(fence + r"(?:lua)?[ 	]*" + chr(92) + "n(.*?)" + fence, text, re.S)
+    if m:
+        return m.group(1).strip()
+    lines = [l for l in text.splitlines() if l.strip()]
+    while lines and not _LUA_START.match(lines[0]):
+        lines.pop(0)
+    return chr(10).join(lines).strip()
 
 
 def _core() -> ctypes.CDLL | None:
@@ -4132,6 +5384,15 @@ class MyAgent(Agent):
         self._t0 = time.monotonic()
 
     # -- lifecycle ---------------------------------------------------------
+    _lua = -1
+    _script_live = False
+    _story = ""
+    _asks = int(os.environ.get("ARC3_ASKS", "20"))
+    _pending = (0, 0)
+    _since_level = 0
+    _last_level = -1
+    _patience = int(os.environ.get("ARC3_PATIENCE", "400"))
+
     def _start(self, latest_frame: FrameData) -> None:
         acts = list(getattr(latest_frame, "available_actions", None) or [1, 2, 3, 4, 5, 6])
         acts = [int(a) for a in acts]
@@ -4160,10 +5421,119 @@ class MyAgent(Agent):
             core.arc3_set_clear_stats(self._h, int(os.environ.get("ARC3_CLEAR", "1")))
             core.arc3_set_balance(self._h, int(os.environ.get("ARC3_BALANCE", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
+
+            # A scripted agent beside the tabular one, if the build has Lua in
+            # it. The two share nothing: the script decides while it has one,
+            # and the counters play whenever it does not.
+            if hasattr(core, "arc3_lua_new") and os.environ.get("ARC3_LLM", "1") != "0":
+                try:
+                    self._lua = core.arc3_lua_new(arr, len(acts))
+                except Exception as e:
+                    print(f"[llm] no lua host: {e}", flush=True)
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
         self._started = True
+
+    # ── the scripted half ────────────────────────────────────────────────────
+
+    _ASK = """You are playing one level of a grid puzzle game by writing short Lua scripts.
+I run what you write, then show you what happened and you write the next one.
+The game does not restart between your scripts.
+
+These functions exist and nothing else does. There is no io, no os, no require.
+
+  objects()      -> array of objects: x, y, colour, glyph, area, w, h
+  changes()      -> what the LAST action did: kind = "moved" (dx, dy, fx, fy),
+                    "appeared" or "vanished", each with colour, area, x, y
+  at(x, y)       -> colour of that cell, or nil off the board
+  size()         -> width, height in cells
+  level()        -> levels finished     steps() -> actions used
+  actions()      -> the buttons this game offers
+  me()           -> the object you control, or nil until something has moved
+  walls()        -> cells found impassable
+  say(text)      -> a line I will show you afterwards
+  press(n)       -> press button n (1..5); true if the board changed
+  click(x, y)    -> click that cell; true if the board changed
+  move_to(x, y)  -> walk there by the shortest known route. One action per step
+                    and the cheapest way to travel; do not write your own loop
+  explore(n)     -> hand n actions to a search that is good at finding what
+                    changes a board when you have no hypothesis yet
+  replay()       -> do again whatever finished the previous level
+  restart()      -> restart this level
+
+Coordinates are cells counted from 0. objects() is the truth about positions.
+
+Your score for a level is (the actions a human needed / the actions you spend),
+squared, and a game is capped by how many of its levels you finish - so getting
+to level two and three matters far more than polishing level one.
+
+I can only ask you about twenty times in this whole game, so a script that
+spends five actions and hands back wastes a turn. Write one that keeps going:
+loop, test an idea, and if it fails try the next within the same script.
+
+"""
+
+    def _with_data(self, val, x, y):
+        act = _ACTION_BY_VALUE.get(val, GameAction.ACTION1)
+        if val == 6:
+            try:
+                act.set_data({"x": int(x), "y": int(y)})
+            except Exception:
+                pass
+        return act
+
+    def _lua_move(self, core, flat, latest_frame):
+        """One action from the script, or None to let the counters play."""
+        buf = (ctypes.c_int8 * (64 * 64)).from_buffer(flat)
+        core.arc3_lua_observe(self._lua, buf, int(latest_frame.levels_completed),
+                              _STATE_CODE.get(latest_frame.state, 0))
+
+        if self._script_live:
+            a, x, y = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+            rc = core.arc3_lua_step(self._lua, ctypes.byref(a), ctypes.byref(x),
+                                    ctypes.byref(y))
+            if rc == 1:
+                self._pending = (x.value, y.value)
+                return self._with_data(a.value, x.value, y.value)
+            self._script_live = False
+            note = self._drain(core)
+            if note:
+                self._story = (self._story + chr(10) + note)[-2000:]
+
+        if self._asks <= 0:
+            return None
+        self._asks -= 1
+        brief = self._brief(core)
+        text = _ask(self._ASK + "What the board looks like now:" + chr(10) + brief
+                    + self._story + chr(10)
+                    + "Write the next few moves as Lua. Put the whole program "
+                      "between ```lua and ```, and nothing else. Under forty lines.")
+        if not text:
+            print("[llm] no answer", flush=True)
+            return None
+        script = _only_lua(text)
+        if not script:
+            print("[llm] answer had no lua: %r" % text[:160], flush=True)
+            return None
+        print("[llm] got %d lines of lua" % len(script.splitlines()), flush=True)
+        if core.arc3_lua_load(self._lua, script.encode("utf-8")) != 0:
+            err = self._drain(core)[:300]
+            print("[llm] did not compile: %s" % err.replace(chr(10), " "), flush=True)
+            self._story = (self._story + chr(10) + "that did not compile: " + err)[-2000:]
+            return None
+        self._script_live = True
+        return self._lua_move(core, flat, latest_frame)
+
+    def _brief(self, core) -> str:
+        b = ctypes.create_string_buffer(16384)
+        n = core.arc3_lua_state(self._lua, b, len(b))
+        return b.value.decode("utf-8", "replace") if n else ""
+
+    def _drain(self, core) -> str:
+        b = ctypes.create_string_buffer(8192)
+        n = core.arc3_lua_drain(self._lua, b, len(b))
+        return b.value.decode("utf-8", "replace") if n else ""
 
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
         if latest_frame.state is GameState.WIN:
@@ -4197,6 +5567,27 @@ class MyAgent(Agent):
                 flat[base + x] = v & 0xFF
 
         core = _core()
+        # Only call on the model where the counters are stuck.
+        #
+        # Measured on tn36: the tabular policy finishes level one at human cost,
+        # which is exactly the cap for finishing one level of a seven-level
+        # game - 3.57 - so there is nothing above it to win. Letting the model
+        # spend actions there took the same level more slowly and scored 2.53.
+        # Where the counters already win fast, the model is pure cost; where
+        # they never win at all - thirteen of the twenty-five games, even at
+        # twenty thousand actions - it is the only thing that can help. So it
+        # waits until nothing has been finished for a while.
+        self._since_level += 1
+        if int(latest_frame.levels_completed) > self._last_level:
+            self._last_level = int(latest_frame.levels_completed)
+            self._since_level = 0
+        stuck = self._since_level >= self._patience
+
+        if core is not None and getattr(self, "_lua", -1) >= 0 and (stuck or self._script_live):
+            act = self._lua_move(core, flat, latest_frame)
+            if act is not None:
+                return act
+
         if core is not None and self._h >= 0:
             buf = (ctypes.c_int8 * (64 * 64)).from_buffer(flat)
             core.arc3_observe(self._h, buf, int(latest_frame.levels_completed),

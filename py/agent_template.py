@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,14 @@ def _build_core() -> ctypes.CDLL | None:
     if not src.strip() or src.startswith("__ARC3_CPP"):
         return None
 
-    tag = hashlib.sha1(src.encode()).hexdigest()[:12]
+    # If a Lua source tree is attached, build the scripted layer in as well.
+    #
+    # The competition notebook has no internet, so the interpreter cannot be
+    # installed - but it can be compiled, because it is C and it is small, and
+    # one extra translation unit is all it costs. Without it the agent is
+    # exactly what it was before: the tabular policy and nothing else.
+    lua_src = _find_lua()
+    tag = hashlib.sha1((src + (lua_src or "")).encode()).hexdigest()[:12]
     outdir = Path(os.environ.get("ARC3_BUILD_DIR", tempfile.gettempdir())) / "arc3"
     outdir.mkdir(parents=True, exist_ok=True)
     ext = ".dll" if sys.platform == "win32" else ".so"
@@ -58,10 +66,15 @@ def _build_core() -> ctypes.CDLL | None:
         # -pthread: the autograd engine parallelises convolutions over the
         # batch with std::thread, and on Linux that needs the flag at both
         # compile and link time or the threads fail at runtime.
-        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread"]
+        cmd = ["g++", "-O2", "-std=c++17", "-shared", "-pthread", "-w"]
         if sys.platform != "win32":
             cmd.append("-fPIC")
-        cmd += [str(cpp), "-o", str(tmp)]
+        cmd += [str(cpp)]
+        if lua_src:
+            one = outdir / f"lua_one_{tag}_{os.getpid()}.cpp"
+            one.write_text(_LUA_ONE, encoding="utf-8")
+            cmd += ["-DARC3_WITH_LUA", "-I", lua_src, str(one)]
+        cmd += ["-o", str(tmp)]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
@@ -74,7 +87,7 @@ def _build_core() -> ctypes.CDLL | None:
                 # Someone else won the race; their build is byte-identical.
                 pass
         except Exception as e:  # g++ missing, timeout, ...
-            print(f"[arc3] cannot build core ({e}); falling back to Python", file=sys.stderr)
+            print(f"[arc3] cannot build core ({e}); falling back to Python", flush=True)
             return None
         finally:
             for f in (cpp, tmp):
@@ -91,7 +104,7 @@ def _build_core() -> ctypes.CDLL | None:
             private.write_bytes(lib.read_bytes())
         dll = ctypes.CDLL(str(private))
     except OSError as e:
-        print(f"[arc3] cannot load core ({e}); falling back to Python", file=sys.stderr)
+        print(f"[arc3] cannot load core ({e}); falling back to Python", flush=True)
         return None
 
     dll.arc3_new.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
@@ -103,6 +116,19 @@ def _build_core() -> ctypes.CDLL | None:
                                 ctypes.POINTER(ctypes.c_int)]
     dll.arc3_choose.restype = ctypes.c_int
     dll.arc3_stats.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    if hasattr(dll, "arc3_lua_new"):
+        dll.arc3_lua_new.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        dll.arc3_lua_new.restype = ctypes.c_int
+        dll.arc3_lua_load.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        dll.arc3_lua_load.restype = ctypes.c_int
+        dll.arc3_lua_observe.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_int8),
+                                         ctypes.c_int, ctypes.c_int]
+        dll.arc3_lua_step.argtypes = [ctypes.c_int] + [ctypes.POINTER(ctypes.c_int)] * 3
+        dll.arc3_lua_step.restype = ctypes.c_int
+        dll.arc3_lua_state.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        dll.arc3_lua_state.restype = ctypes.c_int
+        dll.arc3_lua_drain.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        dll.arc3_lua_drain.restype = ctypes.c_int
     dll.arc3_set_explore.argtypes = [ctypes.c_int, ctypes.c_int]
     dll.arc3_set_alphabet.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.arc3_set_depth.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -118,6 +144,203 @@ def _build_core() -> ctypes.CDLL | None:
 
 _CORE: ctypes.CDLL | None = None
 _CORE_TRIED = False
+
+
+# Lua, as one translation unit. The list of .c files is spelled out because
+# Lua 5.4 does not ship an amalgamation, and the whole thing is wrapped in
+# extern "C" so a C++ build still produces the symbols the API declares.
+_LUA_ONE = r"""// Lua as one C++ translation unit.
+//
+// Our Kaggle notebook compiles a single embedded C++ string with g++ and loads
+// the result through ctypes; there is no build system and no second file. So
+// the question that matters is not "does Lua build" - it does, everywhere - but
+// "does the whole interpreter go into one .cpp with the C++ compiler we already
+// have there". That is what this file tests. Lua 5.4 does not ship onelua.c, so
+// the includes are listed by hand.
+extern "C" {
+#include "lprefix.h"
+}
+// C linkage for the whole interpreter. Compiling Lua as C++ mangles every
+// symbol, so a translation unit that declares the API the normal way -
+// extern "C", as lua.hpp does - fails to link against it. Wrapping the
+// includes fixes that and keeps Lua linkable from C as well.
+extern "C" {
+#define LUA_CORE
+#define LUA_LIB
+#define ltable_c
+#define lvm_c
+#include "lapi.c"
+#include "lcode.c"
+#include "lctype.c"
+#include "ldebug.c"
+#include "ldo.c"
+#include "ldump.c"
+#include "lfunc.c"
+#include "lgc.c"
+#include "llex.c"
+#include "lmem.c"
+#include "lobject.c"
+#include "lopcodes.c"
+#include "lparser.c"
+#include "lstate.c"
+#include "lstring.c"
+#include "ltable.c"
+#include "ltm.c"
+#include "lundump.c"
+#include "lvm.c"
+#include "lzio.c"
+#include "lauxlib.c"
+#include "lbaselib.c"
+#include "lcorolib.c"
+#include "ldblib.c"
+// io/os/loadlib are compiled in because linit.c refers to their luaopen_*.
+// Keeping them out of the sandbox is a runtime decision - clear the globals
+// after opening - not a compile-time one.
+#include "liolib.c"
+#include "loslib.c"
+#include "loadlib.c"
+#include "lmathlib.c"
+#include "lstrlib.c"
+#include "ltablib.c"
+#include "lutf8lib.c"
+#include "linit.c"
+}
+"""
+
+
+def _find_lua() -> str | None:
+    """The directory holding lua.h, if a Lua source tree is attached."""
+    import glob
+    for pat in ("/kaggle/input/**/lua-*/src/lua.h", "/kaggle/input/**/src/lua.h"):
+        hit = glob.glob(pat, recursive=True)
+        if hit:
+            return str(Path(hit[0]).parent)
+    env = os.environ.get("LUA_SRC")
+    if env and (Path(env) / "lua.h").exists():
+        return env
+    return None
+
+
+# ── the model, when one is attached ──────────────────────────────────────────
+#
+# Measured on Kaggle's two T4s with Qwen3.8-27B Q4_K_M: the weights load in
+# 1m52s, the prompt runs at 65 tokens a second and the answer at 13, so one
+# question costs about a minute. Eight hours buys roughly 480 of them across
+# all twenty-five games - about nineteen each. That is far fewer than the
+# leading harness gets, so each one has to buy a lot of actions: the model
+# writes a script, and the script plays.
+
+_LLM = {"url": None, "proc": None, "tried": False}
+
+
+def _llm_url() -> str | None:
+    """Start llama-server once, if its binaries and a model are attached."""
+    if _LLM["tried"]:
+        return _LLM["url"]
+    _LLM["tried"] = True
+    import glob, shutil, stat, urllib.request
+
+    env_url = os.environ.get("LLAMA_SERVER")
+    if env_url:
+        _LLM["url"] = env_url
+        return env_url
+
+    exe = glob.glob("/kaggle/input/**/llama-server", recursive=True)
+    gguf = sorted(glob.glob("/kaggle/input/**/*.gguf", recursive=True),
+                  key=os.path.getsize, reverse=True)
+    if not exe or not gguf:
+        print("[llm] no server or model attached; the tabular policy plays alone",
+              file=sys.stderr)
+        return None
+
+    run = Path(tempfile.gettempdir()) / "llamabin"
+    run.mkdir(exist_ok=True)
+    for f in Path(exe[0]).parent.iterdir():
+        if f.suffix != ".json":
+            shutil.copy2(f, run / f.name)
+    server = run / "llama-server"
+    server.chmod(server.stat().st_mode | stat.S_IEXEC)
+
+    env = dict(os.environ,
+               LD_LIBRARY_PATH=str(run) + ":" + os.environ.get("LD_LIBRARY_PATH", ""))
+    cmd = [str(server), "-m", gguf[0], "-ngl", "99", "--tensor-split", "1,1",
+           "-c", "24576", "-np", "4", "--host", "127.0.0.1", "--port", "8080",
+           "--jinja"]
+    log = open(str(Path(tempfile.gettempdir()) / "llama-server.log"), "w")
+    try:
+        _LLM["proc"] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                        env=env, cwd=str(run))
+    except Exception as e:
+        print(f"[llm] cannot start server: {e}", flush=True)
+        return None
+
+    for _ in range(240):
+        time.sleep(5)
+        if _LLM["proc"].poll() is not None:
+            print(f"[llm] server exited rc={_LLM['proc'].returncode}", flush=True)
+            return None
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=3) as r:
+                if b"ok" in r.read():
+                    _LLM["url"] = "http://127.0.0.1:8080"
+                    print("[llm] server up", flush=True)
+                    return _LLM["url"]
+        except Exception:
+            pass
+    print("[llm] server never came up", flush=True)
+    return None
+
+
+def _ask(prompt: str, n_predict: int = 500) -> str | None:
+    """One question. Returns None on any failure, and says so - a slow or
+    broken path that hides itself is worse than no path at all."""
+    url = _llm_url()
+    if not url:
+        return None
+    import json as _json, urllib.request
+    body = _json.dumps({
+        "messages": [
+            {"role": "system",
+             "content": "You write Lua. Reply with Lua source only: no markdown "
+                        "fence, no explanation."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": n_predict, "temperature": 0.2,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode("utf-8")
+    req = urllib.request.Request(url + "/v1/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return _json.load(r)["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[llm] call failed: {str(e)[:200]}", flush=True)
+        return None
+
+
+_LUA_START = re.compile(r"^\s*(--|local|for|while|if|function|repeat"
+                        r"|do|return|[A-Za-z_][A-Za-z_0-9]*\s*[=(])")
+
+
+def _only_lua(text: str) -> str:
+    """Take the program out of the answer.
+
+    Guessing where the code starts does not work. The model writes a sentence,
+    then the program, and the first line that looks like Lua is often the middle
+    of it - cut there and a function's opening is gone while its `end` remains,
+    which Lua reports as "<eof> expected near 'end'" and the turn is wasted.
+    Both of the first two attempts failed exactly that way.
+    So the prompt asks for a fence and this takes what is inside it. The old
+    guess stays as a fallback for an answer that arrives without one.
+    """
+    fence = "`" * 3
+    m = re.search(fence + r"(?:lua)?[ 	]*" + chr(92) + "n(.*?)" + fence, text, re.S)
+    if m:
+        return m.group(1).strip()
+    lines = [l for l in text.splitlines() if l.strip()]
+    while lines and not _LUA_START.match(lines[0]):
+        lines.pop(0)
+    return chr(10).join(lines).strip()
 
 
 def _core() -> ctypes.CDLL | None:
@@ -163,6 +386,15 @@ class MyAgent(Agent):
         self._t0 = time.monotonic()
 
     # -- lifecycle ---------------------------------------------------------
+    _lua = -1
+    _script_live = False
+    _story = ""
+    _asks = int(os.environ.get("ARC3_ASKS", "20"))
+    _pending = (0, 0)
+    _since_level = 0
+    _last_level = -1
+    _patience = int(os.environ.get("ARC3_PATIENCE", "400"))
+
     def _start(self, latest_frame: FrameData) -> None:
         acts = list(getattr(latest_frame, "available_actions", None) or [1, 2, 3, 4, 5, 6])
         acts = [int(a) for a in acts]
@@ -191,10 +423,119 @@ class MyAgent(Agent):
             core.arc3_set_clear_stats(self._h, int(os.environ.get("ARC3_CLEAR", "1")))
             core.arc3_set_balance(self._h, int(os.environ.get("ARC3_BALANCE", "0")))
             core.arc3_set_budget(self._h, int(self.MAX_ACTIONS))
+
+            # A scripted agent beside the tabular one, if the build has Lua in
+            # it. The two share nothing: the script decides while it has one,
+            # and the counters play whenever it does not.
+            if hasattr(core, "arc3_lua_new") and os.environ.get("ARC3_LLM", "1") != "0":
+                try:
+                    self._lua = core.arc3_lua_new(arr, len(acts))
+                except Exception as e:
+                    print(f"[llm] no lua host: {e}", flush=True)
         else:
             from_py = _PyPolicy(acts)
             self._py = from_py
         self._started = True
+
+    # ── the scripted half ────────────────────────────────────────────────────
+
+    _ASK = """You are playing one level of a grid puzzle game by writing short Lua scripts.
+I run what you write, then show you what happened and you write the next one.
+The game does not restart between your scripts.
+
+These functions exist and nothing else does. There is no io, no os, no require.
+
+  objects()      -> array of objects: x, y, colour, glyph, area, w, h
+  changes()      -> what the LAST action did: kind = "moved" (dx, dy, fx, fy),
+                    "appeared" or "vanished", each with colour, area, x, y
+  at(x, y)       -> colour of that cell, or nil off the board
+  size()         -> width, height in cells
+  level()        -> levels finished     steps() -> actions used
+  actions()      -> the buttons this game offers
+  me()           -> the object you control, or nil until something has moved
+  walls()        -> cells found impassable
+  say(text)      -> a line I will show you afterwards
+  press(n)       -> press button n (1..5); true if the board changed
+  click(x, y)    -> click that cell; true if the board changed
+  move_to(x, y)  -> walk there by the shortest known route. One action per step
+                    and the cheapest way to travel; do not write your own loop
+  explore(n)     -> hand n actions to a search that is good at finding what
+                    changes a board when you have no hypothesis yet
+  replay()       -> do again whatever finished the previous level
+  restart()      -> restart this level
+
+Coordinates are cells counted from 0. objects() is the truth about positions.
+
+Your score for a level is (the actions a human needed / the actions you spend),
+squared, and a game is capped by how many of its levels you finish - so getting
+to level two and three matters far more than polishing level one.
+
+I can only ask you about twenty times in this whole game, so a script that
+spends five actions and hands back wastes a turn. Write one that keeps going:
+loop, test an idea, and if it fails try the next within the same script.
+
+"""
+
+    def _with_data(self, val, x, y):
+        act = _ACTION_BY_VALUE.get(val, GameAction.ACTION1)
+        if val == 6:
+            try:
+                act.set_data({"x": int(x), "y": int(y)})
+            except Exception:
+                pass
+        return act
+
+    def _lua_move(self, core, flat, latest_frame):
+        """One action from the script, or None to let the counters play."""
+        buf = (ctypes.c_int8 * (64 * 64)).from_buffer(flat)
+        core.arc3_lua_observe(self._lua, buf, int(latest_frame.levels_completed),
+                              _STATE_CODE.get(latest_frame.state, 0))
+
+        if self._script_live:
+            a, x, y = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+            rc = core.arc3_lua_step(self._lua, ctypes.byref(a), ctypes.byref(x),
+                                    ctypes.byref(y))
+            if rc == 1:
+                self._pending = (x.value, y.value)
+                return self._with_data(a.value, x.value, y.value)
+            self._script_live = False
+            note = self._drain(core)
+            if note:
+                self._story = (self._story + chr(10) + note)[-2000:]
+
+        if self._asks <= 0:
+            return None
+        self._asks -= 1
+        brief = self._brief(core)
+        text = _ask(self._ASK + "What the board looks like now:" + chr(10) + brief
+                    + self._story + chr(10)
+                    + "Write the next few moves as Lua. Put the whole program "
+                      "between ```lua and ```, and nothing else. Under forty lines.")
+        if not text:
+            print("[llm] no answer", flush=True)
+            return None
+        script = _only_lua(text)
+        if not script:
+            print("[llm] answer had no lua: %r" % text[:160], flush=True)
+            return None
+        print("[llm] got %d lines of lua" % len(script.splitlines()), flush=True)
+        if core.arc3_lua_load(self._lua, script.encode("utf-8")) != 0:
+            err = self._drain(core)[:300]
+            print("[llm] did not compile: %s" % err.replace(chr(10), " "), flush=True)
+            self._story = (self._story + chr(10) + "that did not compile: " + err)[-2000:]
+            return None
+        self._script_live = True
+        return self._lua_move(core, flat, latest_frame)
+
+    def _brief(self, core) -> str:
+        b = ctypes.create_string_buffer(16384)
+        n = core.arc3_lua_state(self._lua, b, len(b))
+        return b.value.decode("utf-8", "replace") if n else ""
+
+    def _drain(self, core) -> str:
+        b = ctypes.create_string_buffer(8192)
+        n = core.arc3_lua_drain(self._lua, b, len(b))
+        return b.value.decode("utf-8", "replace") if n else ""
 
     def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
         if latest_frame.state is GameState.WIN:
@@ -228,6 +569,27 @@ class MyAgent(Agent):
                 flat[base + x] = v & 0xFF
 
         core = _core()
+        # Only call on the model where the counters are stuck.
+        #
+        # Measured on tn36: the tabular policy finishes level one at human cost,
+        # which is exactly the cap for finishing one level of a seven-level
+        # game - 3.57 - so there is nothing above it to win. Letting the model
+        # spend actions there took the same level more slowly and scored 2.53.
+        # Where the counters already win fast, the model is pure cost; where
+        # they never win at all - thirteen of the twenty-five games, even at
+        # twenty thousand actions - it is the only thing that can help. So it
+        # waits until nothing has been finished for a while.
+        self._since_level += 1
+        if int(latest_frame.levels_completed) > self._last_level:
+            self._last_level = int(latest_frame.levels_completed)
+            self._since_level = 0
+        stuck = self._since_level >= self._patience
+
+        if core is not None and getattr(self, "_lua", -1) >= 0 and (stuck or self._script_live):
+            act = self._lua_move(core, flat, latest_frame)
+            if act is not None:
+                return act
+
         if core is not None and self._h >= 0:
             buf = (ctypes.c_int8 * (64 * 64)).from_buffer(flat)
             core.arc3_observe(self._h, buf, int(latest_frame.levels_completed),

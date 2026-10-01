@@ -24,7 +24,8 @@ _LOCAL_INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"\s*$')
 # It sits behind #ifdef ARC3_WITH_LUA so it would compile away harmlessly, but
 # it also pulls lua.h, which the notebook has no way to find. Leaving it out
 # keeps the thing that ships from depending on a toolchain it never uses.
-_SKIP = {"arc3_lua.h"}
+_SKIP = set()   # the Lua layer ships too now; it is behind #ifdef ARC3_WITH_LUA
+                # and only compiled when the notebook finds a Lua source tree
 
 
 def expand(path: Path, seen: set[Path]) -> list[str]:
