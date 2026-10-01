@@ -1192,3 +1192,60 @@ input: ['competitions']
 `--force-budget 100000` の測定はバックグラウンドの時間上限で停止した。
 深さが予算に比例するかの確認だが、上の算数(3)で「比例しても桁が足りない」ことが
 分かったので、優先度は下がった。
+
+# 2026-10-01: Kaggle で 27B が動いた
+
+## 経路の確定
+
+Phase A(提出枠を使わない)で本番環境を調べた結果:
+```
+torch 2.10+cu128 / Tesla T4 x2 (15.6GB each) / transformers 5.0.0
+vllm NO / llama_cpp NO / bitsandbytes NO / autoawq NO / gptq NO
+nvcc 12.8 あり / cmake あり
+```
+**インターネット禁止で pip install できないので、`bitsandbytes` が無い時点で
+transformers 経由の4bitは不可能。llama.cpp を自分で建てる一択。**
+
+## やったこと
+
+| | |
+|---|---|
+| llama.cpp ソースをデータセット化 | `yomeiotani/llamacpp-source` (lua 5.4.8 も同梱) |
+| CUDA ビルド用ノートブック | `yomeiotani/build-llama-cpp-for-t4`、**1,812秒で成功** |
+| バイナリをデータセット化 | `yomeiotani/llamacpp-t4-binaries` (162MB) |
+| 起動テスト | `yomeiotani/serve-qwen-on-t4`、**成功** |
+
+GGUF は公開データセット `kiritoobjectcode/qwen3-27b-gguf`
+(Qwen3.8-27B-UD-Q4_K_M, 16.5GB) を添付するだけ。
+
+### 途中で潰した3つ
+
+1. `nvcc` があるか不明 → **あった**(12.8)
+2. `CUDA::cuda_driver` が見つからない → イメージには `libcuda.so.1` しか無く、
+   CMake は `libcuda.so` を探す。`/usr/local/nvidia/lib64/libcuda.so` を見つけて渡す
+3. `libllama-common.so.0` が無い → SONAME はバージョン付き。`.so` だけ残して
+   `.so.0` を捨てていた。両方入れる
+
+## 実測した数字 (T4 x2, 27B Q4_K_M)
+
+```
+model loaded          1分52秒
+prompt eval           65.4 t/s
+eval                  13.0 t/s
+```
+
+| | 値 | 含意 |
+|---|---|---|
+| ロード | 1分52秒 | 8時間枠の0.4%。無視できる |
+| 1回の呼び出し | **約60秒** | 盤面2,000トークン + 返答400トークン |
+| 8時間で打てる回数 | **最大480回** | 全25ゲーム合計。1ゲーム約19回 |
+
+3090 で 40 t/s だったものが T4 で 13 t/s、約3分の1。**1位は1ゲームに最大900回
+呼べるのに対し、こちらは全ゲーム合計で480回。** ここが最大の差として残る。
+
+### 呼び出し回数を増やす手
+
+- `--tensor-split` をやめて **8B を2基に1つずつ** → 並列度2倍、質は落ちる
+- プロンプトを短くする(前処理30秒の削減が効く)
+- `libllama.so` 直叩きでサーバとHTTPを省く(ユーザ提案)。ただしチャットテンプレートの
+  適用を自前でやる必要があり、そこは以前 `/completion` で失敗した箇所
