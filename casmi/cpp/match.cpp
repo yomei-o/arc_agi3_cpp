@@ -129,9 +129,13 @@ int main(int argc, char** argv) {
   float ppm = argc > 2 ? float(std::atof(argv[2])) : 10.0f;
   float tol = argc > 3 ? float(std::atof(argv[3])) : 0.01f;
   int topk = argc > 4 ? std::atoi(argv[4]) : 25;
+  // Swap in the holdout by name, so the thing that is measured is the thing
+  // that is submitted and not a second implementation of it.
+  std::string lib_stem = argc > 5 ? argv[5] : "train";
+  std::string qry_stem = argc > 6 ? argv[6] : "test";
 
-  Store tr = load(dir, "train");
-  Store te = load(dir, "test");
+  Store tr = load(dir, lib_stem);
+  Store te = load(dir, qry_stem);
 
   // Training spectra sorted by precursor mass, so a candidate window is a
   // binary search rather than a scan of two and a half million rows.
@@ -152,6 +156,7 @@ int main(int argc, char** argv) {
   std::sort(mol_ids.begin(), mol_ids.end());
 
   std::vector<std::string> answer(mol_ids.size());
+  std::vector<int> hit_rank(mol_ids.size(), -1);
   unsigned nthread = std::max(1u, std::thread::hardware_concurrency());
   std::vector<std::thread> pool;
   std::atomic<size_t> next(0);
@@ -191,11 +196,18 @@ int main(int argc, char** argv) {
                   });
 
         std::string out;
-        for (size_t r = 0; r < rank.size() && int(r) < topk; ++r) {
+        int placed = 0;
+        for (size_t r = 0; r < rank.size() && placed < topk; ++r) {
           const std::string& smi = tr.smiles[rank[r].second];
-          if (smi.empty()) continue;
+          if (smi.empty()) continue;          // a molecule with no structure
           if (!out.empty()) out += ';';
           out += smi;
+          ++placed;
+          // On a holdout the query carries its own answer, so note where it
+          // landed. The run then scores itself and no submission is spent
+          // finding out whether a change helped.
+          if (hit_rank[idx] < 0 && tr.name[rank[r].second] == te.name[mol_ids[idx]])
+            hit_rank[idx] = placed;
         }
         answer[idx] = out;
       }
@@ -209,5 +221,22 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < mol_ids.size(); ++i)
     out << te.name[mol_ids[i]] << ',' << answer[i] << '\n';
   std::printf("wrote %s for %zu molecules\n", path.c_str(), mol_ids.size());
+
+  int found = 0;
+  for (int r : hit_rank) found += (r > 0);
+  if (found) {
+    double mrr = 0.0;
+    int t1 = 0, t5 = 0;
+    for (int r : hit_rank) {
+      if (r <= 0) continue;
+      mrr += 1.0 / r;
+      t1 += (r == 1);
+      t5 += (r <= 5);
+    }
+    size_t n = mol_ids.size();
+    std::printf("top1 %.1f%%  top5 %.1f%%  top%d %.1f%%  MRR %.3f  (n=%zu)\n",
+                100.0 * t1 / n, 100.0 * t5 / n, topk, 100.0 * found / n,
+                mrr / n, n);
+  }
   return 0;
 }

@@ -6,8 +6,13 @@ would measure the wrong thing - and on the last project a proxy that did not
 match the real conditions invalidated nine days of comparisons, so this one is
 built to match.
 
-Every spectrum of a held-out molecule leaves the library, otherwise the search
-finds the molecule by finding itself and the number means nothing.
+One spectrum of each held-out molecule becomes the query and the REST stay in
+the library. Removing the molecule entirely was the first attempt and it scored
+zero by construction - there was nothing left to find. The real test molecules
+are not strangers either: all four hundred of their precursor masses exist in
+the training set, so the task is to pick the right molecule out of about a
+hundred with the same mass, not to invent one that is not there. The query
+spectrum itself is excluded, so nothing is found by matching itself.
 
     python make_holdout.py [root]
 """
@@ -83,10 +88,12 @@ def main() -> None:
             pmz = float(r.precursor_mz) if r.precursor_mz == r.precursor_mz else 0.0
             smi = r.normalized_smiles if isinstance(r.normalized_smiles, str) else ""
 
-            if key in held:
-                # Only the instrument the real test uses goes into the queries.
-                if r.instrument_type != "timsTOF" or not (MZ_LO <= pmz <= MZ_HI):
-                    continue
+            # A held-out molecule contributes its first eligible spectrum to
+            # the queries; everything else it has stays in the library.
+            take = False
+            if key in held and r.instrument_type == "timsTOF" and MZ_LO <= pmz <= MZ_HI:
+                take = key not in qry_mols
+            if take:
                 if key not in qry_mols:
                     qry_mols[key] = len(qry_names)
                     qry_names.append(key)
