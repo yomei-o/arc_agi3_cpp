@@ -1,0 +1,16 @@
+{
+  "id": "yomeiotani/casmi26-cpp-library-search",
+  "title": "CASMI26 cpp library search",
+  "code_file": "casmi_match.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [
+    "enveda-CASMI26-molecule-id-mass-spectra"
+  ],
+  "model_sources": []
+}

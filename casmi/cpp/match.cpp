@@ -169,22 +169,42 @@ int main(int argc, char** argv) {
         if (idx >= mol_ids.size()) break;
         best.clear();
 
-        for (int si : by_mol[mol_ids[idx]]) {
-          const Head& q = te.head[si];
-          float window = q.precursor * ppm * 1e-6f;
-          size_t lo = std::lower_bound(keys.begin(), keys.end(), q.precursor - window)
-                      - keys.begin();
-          size_t hi = std::upper_bound(keys.begin(), keys.end(), q.precursor + window)
-                      - keys.begin();
-          for (size_t p = lo; p < hi; ++p) {
-            const Head& c = tr.head[order[p]];
-            if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
-            float s = cosine(te.mzs(q), te.its(q), q.n,
-                             tr.mzs(c), tr.its(c), c.n, tol);
-            auto it = best.find(c.mol);
-            if (it == best.end()) best.emplace(c.mol, s);
-            else it->second = std::max(it->second, s);
+        // Widen the mass window until there are enough candidates to fill the
+        // answer.
+        //
+        // A tight window is what made this work - at 0.2 ppm the median test
+        // molecule competes against a handful of others instead of a hundred,
+        // and MRR went from 0.084 to 0.44. But tight also means 354 of the 400
+        // molecules came back with fewer than 25 candidates and one came back
+        // with a single candidate, which throws away the twenty-four free
+        // guesses the format allows. So start tight and open up only as far as
+        // filling the list requires.
+        // A candidate found in a tighter pass keeps the rank that pass gave
+        // it: the tight window is the better evidence, and a molecule only
+        // reachable at 50 ppm belongs below one reachable at 0.2.
+        float ppm_used = ppm;
+        for (int pass = 0; pass < 8 && int(best.size()) < topk; ++pass) {
+          for (int si : by_mol[mol_ids[idx]]) {
+            const Head& q = te.head[si];
+            float window = q.precursor * ppm_used * 1e-6f;
+            size_t lo = std::lower_bound(keys.begin(), keys.end(),
+                                         q.precursor - window) - keys.begin();
+            size_t hi = std::upper_bound(keys.begin(), keys.end(),
+                                         q.precursor + window) - keys.begin();
+            for (size_t p = lo; p < hi; ++p) {
+              const Head& c = tr.head[order[p]];
+              if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
+              float s = cosine(te.mzs(q), te.its(q), q.n,
+                               tr.mzs(c), tr.its(c), c.n, tol);
+              // Later passes are worse evidence, so their scores sit below
+              // everything the tight passes already placed.
+              s -= float(pass);
+              auto it = best.find(c.mol);
+              if (it == best.end()) best.emplace(c.mol, s);
+              else it->second = std::max(it->second, s);
+            }
           }
+          ppm_used *= 3.0f;
         }
 
         std::vector<std::pair<float, int> > rank;
