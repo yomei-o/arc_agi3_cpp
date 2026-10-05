@@ -47,6 +47,7 @@ struct Store {
   const float* mzs(const Head& h) const { return mz.data() + h.off; }
   const float* its(const Head& h) const { return inten.data() + h.off; }
   int adduct(const Head& h) const { return h.tag < 0 ? -1 : h.tag / 16; }
+  int instr(const Head& h) const { return h.tag < 0 ? -1 : h.tag % 16; }
 };
 
 std::vector<char> slurp(const std::string& path) {
@@ -198,6 +199,13 @@ int main(int argc, char** argv) {
   float sigma = argc > 7 ? float(std::atof(argv[7])) : 3.0f;
   float alpha = argc > 8 ? float(std::atof(argv[8])) : 0.1f;
   int simmode = argc > 9 ? std::atoi(argv[9]) : 1;   // 1 entropy, 0 sqrt cosine
+  // 0 off, 1 soft bonus for a same-instrument hit, 2 hard-require same
+  // instrument when both are known. Cross-instrument fragmentation patterns
+  // differ systematically (declustering voltage, collision cell physics), so
+  // this is worth a controlled measurement rather than an assumption either
+  // way: a hard filter can delete the only reference a Class-1 molecule has.
+  int instr_mode = argc > 10 ? std::atoi(argv[10]) : 0;
+  float instr_bonus = argc > 11 ? float(std::atof(argv[11])) : 0.1f;
 
   Store tr = load(dir, lib_stem);
   Store te = load(dir, qry_stem);
@@ -262,11 +270,14 @@ int main(int argc, char** argv) {
             for (size_t p = lo; p < hi; ++p) {
               const Head& c = tr.head[order[p]];
               if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
+              bool same_instr = q.tag >= 0 && c.tag >= 0 && te.instr(q) == tr.instr(c);
+              if (instr_mode == 2 && q.tag >= 0 && c.tag >= 0 && !same_instr) continue;
               float s = simmode
                   ? entropy_sim(te.mzs(q), te.its(q), q.n, te.ent[si],
                                 tr.mzs(c), tr.its(c), c.n, tr.ent[order[p]], tol)
                   : cosine(te.mzs(q), te.its(q), q.n,
                            tr.mzs(c), tr.its(c), c.n, tol);
+              if (instr_mode == 1 && same_instr) s += instr_bonus;
               float dppm = (c.precursor - q.precursor) / q.precursor * 1e6f;
               float z = dppm / sigma;
               s -= alpha * z * z;

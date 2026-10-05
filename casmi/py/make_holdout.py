@@ -107,6 +107,15 @@ def main() -> None:
     lib_off = qry_off = 0
     nl = nq = 0
     MAX_Q = 3          # the real test averages three spectra per molecule
+    # In sibling mode at least one eligible spectrum of a held molecule must
+    # stay behind in the library, or the "sibling" is a sibling of nothing and
+    # the holdout silently turns into denovo for every molecule that happens
+    # to have exactly 2 or 3 eligible spectra. First cut of this script missed
+    # that: MRR on a realistic 3-spectra-per-molecule holdout read 0.28
+    # against single-spectrum's 0.47, which looked like the multi-spectrum
+    # case being much harder when it was actually ~40% of molecules having
+    # zero library representation.
+    max_q_for: dict[str, int] = {}
     qcount: dict[str, int] = {}
 
     cols = ["inchikey14", "normalized_smiles", "precursor_mz", "adduct",
@@ -131,8 +140,11 @@ def main() -> None:
 
             eligible = (r.instrument_type == "timsTOF" and MZ_LO <= pmz <= MZ_HI)
             if key in held:
+                if key not in max_q_for:
+                    cap = MAX_Q if MODE == "denovo" else min(MAX_Q, seen.get(key, 1) - 1)
+                    max_q_for[key] = max(0, cap)
                 # A query spectrum has to look like a test spectrum.
-                if eligible and qcount.get(key, 0) < MAX_Q:
+                if eligible and qcount.get(key, 0) < max_q_for[key]:
                     qcount[key] = qcount.get(key, 0) + 1
                     if key not in qry_mols:
                         qry_mols[key] = len(qry_names)
