@@ -55,7 +55,15 @@ answer present in library:  400 / 400
 バイナリに変換して検索を走らせる。`-f submission.csv -k <notebook> -v <version>`
 の全部が必要。**1日5回出せる。**
 
-初回提出 56841142 (2026-10-05)。
+初回提出 56841142 (2026-10-05)。status は COMPLETE になるが publicScore は
+しばらく空欄のまま。リーダーボードへの反映に時間がかかる。
+
+### 提出で踏んだこと
+
+- CSV の直接提出は 400 Bad Request。ノートブック提出形式
+- `-k <notebook> -v <version>` だけでも 400。**`-f submission.csv` も同時に要る**
+- 入力ディレクトリ名を URL のスラッグから推測して失敗した。
+  `glob("/kaggle/input/**/train.parquet")` で探すこと
 
 ## 公開ボード(10-05時点)
 
