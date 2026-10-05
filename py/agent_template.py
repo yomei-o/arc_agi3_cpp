@@ -245,6 +245,32 @@ def _llm_url() -> str | None:
         _LLM["url"] = env_url
         return env_url
 
+    # vLLM first, when the image has it and a model directory is attached.
+    #
+    # Both serve the same OpenAI-compatible endpoint, so nothing above this
+    # function changes. vLLM is the better one where it exists: it batches
+    # continuously and, on a Qwen that supports it, decodes several tokens per
+    # step. llama.cpp is what makes the agent work at all on the ordinary Kaggle
+    # image, which has no vLLM and no way to install one.
+    import importlib.util
+    if importlib.util.find_spec("vllm") is not None:
+        cfgs = glob.glob("/kaggle/input/**/config.json", recursive=True)
+        if cfgs:
+            model_dir = str(Path(sorted(cfgs, key=len)[0]).parent)
+            print("[llm] vllm serving " + model_dir, flush=True)
+            cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+                   "--model", model_dir, "--host", "127.0.0.1", "--port", "8080",
+                   "--max-model-len", os.environ.get("VLLM_MAXLEN", "16384"),
+                   "--gpu-memory-utilization", os.environ.get("VLLM_UTIL", "0.90")]
+            log = open(str(Path(tempfile.gettempdir()) / "vllm.log"), "w")
+            try:
+                _LLM["proc"] = subprocess.Popen(cmd, stdout=log,
+                                                stderr=subprocess.STDOUT)
+                return _wait_for_server()
+            except Exception as e:
+                print("[llm] cannot start vllm: %s" % e, flush=True)
+
+
     exe = glob.glob("/kaggle/input/**/llama-server", recursive=True)
     gguf = sorted(glob.glob("/kaggle/input/**/*.gguf", recursive=True),
                   key=os.path.getsize, reverse=True)
@@ -274,22 +300,29 @@ def _llm_url() -> str | None:
         print(f"[llm] cannot start server: {e}", flush=True)
         return None
 
-    for _ in range(240):
+    return _wait_for_server()
+
+
+def _wait_for_server(limit: int = 360) -> str | None:
+    """Wait for whichever server was started. vLLM takes the longer end of it."""
+    import urllib.request
+    for _ in range(limit):
         time.sleep(5)
-        if _LLM["proc"].poll() is not None:
-            print(f"[llm] server exited rc={_LLM['proc'].returncode}", flush=True)
+        if _LLM["proc"] is not None and _LLM["proc"].poll() is not None:
+            print("[llm] server exited rc=%s" % _LLM["proc"].returncode, flush=True)
             return None
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=3) as r:
-                if b"ok" in r.read():
-                    _LLM["url"] = "http://127.0.0.1:8080"
-                    print("[llm] server up", flush=True)
-                    return _LLM["url"]
-        except Exception:
-            pass
+        for path in ("/health", "/v1/models"):
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8080" + path,
+                                            timeout=3) as r:
+                    r.read()
+                _LLM["url"] = "http://127.0.0.1:8080"
+                print("[llm] server up", flush=True)
+                return _LLM["url"]
+            except Exception:
+                pass
     print("[llm] server never came up", flush=True)
     return None
-
 
 def _ask(prompt: str, n_predict: int = 500) -> str | None:
     """One question. Returns None on any failure, and says so - a slow or
