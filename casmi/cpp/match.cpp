@@ -278,6 +278,11 @@ int main(int argc, char** argv) {
 
   std::vector<std::string> answer(mol_ids.size());
   std::vector<int> hit_rank(mol_ids.size(), -1);
+  // How many candidates the TIGHTEST pass alone found, before any widening -
+  // a separate signal from "25 candidates exist", which the staged widening
+  // guarantees almost by construction and so cannot tell a confident Class-1
+  // hit apart from 25 slots padded out with whatever the loosest pass found.
+  std::vector<int> tight_count(mol_ids.size(), 0);
   unsigned nthread = std::max(1u, std::thread::hardware_concurrency());
   std::vector<std::thread> pool;
   std::atomic<size_t> next(0);
@@ -341,6 +346,7 @@ int main(int argc, char** argv) {
               else it->second = std::max(it->second, s);
             }
           }
+          if (pass == 0) tight_count[idx] = int(best.size());
           ppm_used *= 3.0f;
         }
 
@@ -378,6 +384,11 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < mol_ids.size(); ++i)
     out << te.name[mol_ids[i]] << ',' << answer[i] << '\n';
   std::printf("wrote %s for %zu molecules\n", path.c_str(), mol_ids.size());
+
+  std::ofstream tc(dir + "/tight_count.csv");
+  tc << "molecule_id,tight_count\n";
+  for (size_t i = 0; i < mol_ids.size(); ++i)
+    tc << te.name[mol_ids[i]] << ',' << tight_count[i] << '\n';
 
   int found = 0;
   for (int r : hit_rank) found += (r > 0);
