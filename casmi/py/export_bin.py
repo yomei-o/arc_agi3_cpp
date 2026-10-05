@@ -20,6 +20,19 @@ import pyarrow.parquet as pq
 
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else r"C:\prog\casmi")
 
+# Dropping peaks below this fraction of a spectrum's own base peak.
+#
+# ms2_mzs/ms2_normalized_intensities are not clean centroided peak lists: most
+# spectra have a few dozen peaks (median 42), but a minority run into the tens
+# of thousands (max measured 73,318), almost all of it near-zero-intensity
+# filler. A cosine or entropy similarity computed over that is mostly scoring
+# incidental overlap between two noise floors rather than real fragments,
+# which dilutes genuine matches once a few hundred candidates share a mass
+# window. Measured on a 400-molecule holdout: unfiltered MRR 0.43, with this
+# floor 0.81 - and the gain is flat across a 20x range of the threshold
+# (0.0005 to 0.01 all read 0.79-0.81), so the exact value is not load-bearing.
+PEAK_FLOOR = 0.002
+
 ADDUCTS = ["[M+H]+", "[M-H]-", "[M+Na]+", "[M+NH4]+", "[M+K]+", "[M+Cl]-",
            "[M+CH2O2-H]-", "[M+H-H2O]+", "[2M+H]+", "[2M+Na]+"]
 ADDUCT_ID = {a: i for i, a in enumerate(ADDUCTS)}
@@ -51,6 +64,12 @@ def export(src: Path, out: str, with_labels: bool) -> None:
             if k == 0:
                 continue
             mz, it = mz[:k], it[:k]
+            if k > 0 and it.max() > 0:
+                keep = it >= PEAK_FLOOR * it.max()
+                mz, it = mz[keep], it[keep]
+            k = len(mz)
+            if k == 0:
+                continue
             o = np.argsort(mz)            # the comparison walks both lists in order
             peaks.write(mz[o].tobytes())
             peaks.write(it[o].tobytes())

@@ -183,6 +183,51 @@ float entropy_sim(const float* amz, const float* ait, int an, float sa,
   return float(v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v);
 }
 
+// A molecule's several query spectra merged into one before matching, instead
+// of matching each separately and taking the best candidate score across
+// them. Close peaks (within tol) are summed rather than kept apart, then the
+// merge is renormalised and entropy-weighted exactly as load() treats a
+// stored spectrum - a merged spectrum is just a spectrum.
+//
+// The tutorial notebook reports feeding the wrong one of these two costs
+// ~0.02 MRR; which one is wrong is exactly what this flag is for measuring.
+struct MergedSpec { std::vector<float> mz, it; float ent = 0.0f; };
+
+MergedSpec merge_query(const Store& te, const std::vector<int>& sis, float tol) {
+  std::vector<std::pair<float, float> > peaks;
+  for (int si : sis) {
+    const Head& q = te.head[si];
+    const float* mz = te.mzs(q);
+    const float* it = te.its(q);
+    for (int k = 0; k < q.n; ++k) peaks.emplace_back(mz[k], it[k]);
+  }
+  std::sort(peaks.begin(), peaks.end());
+  MergedSpec out;
+  for (auto& pr : peaks) {
+    if (!out.mz.empty() && pr.first - out.mz.back() <= tol) out.it.back() += pr.second;
+    else { out.mz.push_back(pr.first); out.it.push_back(pr.second); }
+  }
+  double sum = 0.0;
+  for (float x : out.it) sum += double(x);
+  if (sum <= 0.0) return out;
+  for (float& x : out.it) x = float(double(x) / sum);
+  double S = 0.0;
+  for (float x : out.it) if (x > 0.0f) S -= double(x) * std::log(double(x));
+  if (S < 3.0) {
+    double w = 0.25 + 0.25 * S, s2 = 0.0;
+    for (float& x : out.it) { x = float(std::pow(double(x), w)); s2 += double(x); }
+    if (s2 > 0.0) {
+      S = 0.0;
+      for (float& x : out.it) {
+        x = float(double(x) / s2);
+        if (x > 0.0f) S -= double(x) * std::log(double(x));
+      }
+    }
+  }
+  out.ent = float(S);
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -206,6 +251,9 @@ int main(int argc, char** argv) {
   // way: a hard filter can delete the only reference a Class-1 molecule has.
   int instr_mode = argc > 10 ? std::atoi(argv[10]) : 0;
   float instr_bonus = argc > 11 ? float(std::atof(argv[11])) : 0.1f;
+  // Match each of a molecule's spectra separately and keep the best candidate
+  // score across them (0), or merge the spectra into one before matching (1).
+  int merge_mode = argc > 12 ? std::atoi(argv[12]) : 0;
 
   Store tr = load(dir, lib_stem);
   Store te = load(dir, qry_stem);
@@ -242,6 +290,9 @@ int main(int argc, char** argv) {
         if (idx >= mol_ids.size()) break;
         best.clear();
 
+        MergedSpec merged;
+        if (merge_mode) merged = merge_query(te, by_mol[mol_ids[idx]], tol);
+
         // One window, and being near the middle of it is worth something.
         //
         // The window used to start at 0.05 ppm and widen by 3x until 25
@@ -272,10 +323,14 @@ int main(int argc, char** argv) {
               if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
               bool same_instr = q.tag >= 0 && c.tag >= 0 && te.instr(q) == tr.instr(c);
               if (instr_mode == 2 && q.tag >= 0 && c.tag >= 0 && !same_instr) continue;
+              const float* qmz = merge_mode ? merged.mz.data() : te.mzs(q);
+              const float* qit = merge_mode ? merged.it.data() : te.its(q);
+              int qn = merge_mode ? int(merged.mz.size()) : q.n;
+              float qent = merge_mode ? merged.ent : te.ent[si];
               float s = simmode
-                  ? entropy_sim(te.mzs(q), te.its(q), q.n, te.ent[si],
+                  ? entropy_sim(qmz, qit, qn, qent,
                                 tr.mzs(c), tr.its(c), c.n, tr.ent[order[p]], tol)
-                  : cosine(te.mzs(q), te.its(q), q.n,
+                  : cosine(qmz, qit, qn,
                            tr.mzs(c), tr.its(c), c.n, tol);
               if (instr_mode == 1 && same_instr) s += instr_bonus;
               float dppm = (c.precursor - q.precursor) / q.precursor * 1e6f;

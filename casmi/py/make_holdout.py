@@ -69,6 +69,35 @@ for _a in sys.argv[1:]:
         JITTER_PPM = float(_a.split("=", 1)[1] if "=" in _a
                            else sys.argv[sys.argv.index(_a) + 1])
 
+# Peak cleaning, applied uniformly to library and query spectra alike (a
+# library/query mismatch in cleaning would just be measuring the mismatch).
+# INT_FLOOR drops peaks below this fraction of the spectrum's own base peak;
+# MAX_PEAKS then keeps only the N most intense survivors. Both default to off
+# so the effect can be measured against the unfiltered baseline rather than
+# assumed from the public notebook's numbers (INT_FLOOR 0.002, MAX_PEAKS 256).
+INT_FLOOR = 0.0
+MAX_PEAKS = 0
+for _a in sys.argv[1:]:
+    if _a.startswith("--floor"):
+        INT_FLOOR = float(_a.split("=", 1)[1] if "=" in _a
+                          else sys.argv[sys.argv.index(_a) + 1])
+    if _a.startswith("--maxpeaks"):
+        MAX_PEAKS = int(_a.split("=", 1)[1] if "=" in _a
+                       else sys.argv[sys.argv.index(_a) + 1])
+
+
+def clean_peaks(mz: np.ndarray, it: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if len(it) == 0:
+        return mz, it
+    if INT_FLOOR > 0.0:
+        keep = it >= INT_FLOOR * it.max()
+        mz, it = mz[keep], it[keep]
+    if MAX_PEAKS > 0 and len(it) > MAX_PEAKS:
+        top = np.argsort(-it)[:MAX_PEAKS]
+        top.sort()
+        mz, it = mz[top], it[top]
+    return mz, it
+
 ADDUCTS = ["[M+H]+", "[M-H]-", "[M+Na]+", "[M+NH4]+", "[M+K]+", "[M+Cl]-",
            "[M+CH2O2-H]-", "[M+H-H2O]+", "[2M+H]+", "[2M+Na]+"]
 ADDUCT_ID = {a: i for i, a in enumerate(ADDUCTS)}
@@ -133,6 +162,10 @@ def main() -> None:
                 continue
             o = np.argsort(mz[:k])
             mz, it = mz[:k][o], it[:k][o]
+            mz, it = clean_peaks(mz, it)
+            k = len(mz)
+            if k == 0:
+                continue
             tag = (ADDUCT_ID.get(r.adduct, -1) * 16
                    + INSTR_ID.get(r.instrument_type, -1))
             pmz = float(r.precursor_mz) if r.precursor_mz == r.precursor_mz else 0.0
