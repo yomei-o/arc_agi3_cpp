@@ -12,6 +12,9 @@
 //
 // Build:
 //   g++ -O3 -std=c++17 -pthread -o match match.cpp
+//
+// Usage:
+//   match <dir> <ppm> <peak_tol> <topk> <lib_stem> <qry_stem> [sigma_ppm] [alpha]
 
 #include <algorithm>
 #include <atomic>
@@ -39,6 +42,7 @@ struct Store {
   std::vector<Head> head;
   std::vector<float> mz, inten;
   std::vector<std::string> name, smiles;
+  std::vector<float> ent;        // Shannon entropy of each spectrum, after weighting
 
   const float* mzs(const Head& h) const { return mz.data() + h.off; }
   const float* its(const Head& h) const { return inten.data() + h.off; }
@@ -86,6 +90,41 @@ Store load(const std::string& dir, const std::string& stem) {
     s.name.push_back(line.substr(0, t));
     s.smiles.push_back(t == std::string::npos ? "" : line.substr(t + 1));
   }
+  // Entropy weighting, Li et al. 2021.
+  //
+  // A plain dot product treats a three-peak spectrum and an eighty-peak one as
+  // equally trustworthy. They are not: a low-entropy spectrum carries few
+  // independent constraints and matches far too many things by accident. The
+  // fix is to flatten the confident-looking ones before comparing, raising the
+  // intensities to w = 0.25 + 0.25 S when the entropy S is below 3, and to
+  // score with entropy similarity instead of cosine. The one published
+  // measurement on this competition puts Class-1 MRR at 0.919 with it against
+  // 0.895 with sqrt intensities.
+  s.ent.resize(s.head.size());
+  for (size_t i = 0; i < s.head.size(); ++i) {
+    const Head& h = s.head[i];
+    float* it = s.inten.data() + h.off;
+    double sum = 0.0;
+    for (int k = 0; k < h.n; ++k) sum += double(it[k]);
+    if (sum <= 0.0) { s.ent[i] = 0.0f; continue; }
+    for (int k = 0; k < h.n; ++k) it[k] = float(double(it[k]) / sum);
+    double S = 0.0;
+    for (int k = 0; k < h.n; ++k)
+      if (it[k] > 0.0f) S -= double(it[k]) * std::log(double(it[k]));
+    if (S < 3.0) {
+      double w = 0.25 + 0.25 * S, s2 = 0.0;
+      for (int k = 0; k < h.n; ++k) { it[k] = float(std::pow(double(it[k]), w)); s2 += it[k]; }
+      if (s2 > 0.0) {
+        S = 0.0;
+        for (int k = 0; k < h.n; ++k) {
+          it[k] = float(double(it[k]) / s2);
+          if (it[k] > 0.0f) S -= double(it[k]) * std::log(double(it[k]));
+        }
+      }
+    }
+    s.ent[i] = float(S);
+  }
+
   std::printf("%s: %zu spectra, %zu molecules, %zu peaks\n",
               stem.c_str(), s.head.size(), s.name.size(), total);
   return s;
@@ -122,6 +161,27 @@ float cosine(const float* amz, const float* ait, int an,
   return float(dot / std::sqrt(norma * normb + 1e-12));
 }
 
+// Entropy similarity. Both spectra are already normalised to sum 1 and
+// weighted, so their merge is the average of the two and
+//     sim = 1 - (2 S_AB - S_A - S_B) / ln 4
+// which is 1 for identical spectra and 0 for disjoint ones.
+float entropy_sim(const float* amz, const float* ait, int an, float sa,
+                  const float* bmz, const float* bit, int bn, float sb,
+                  float tol) {
+  double sab = 0.0;
+  int i = 0, j = 0;
+  auto add = [&sab](double q) { if (q > 0.0) sab -= q * std::log(q); };
+  while (i < an && j < bn) {
+    if (bmz[j] < amz[i] - tol) { add(0.5 * double(bit[j])); ++j; }
+    else if (bmz[j] > amz[i] + tol) { add(0.5 * double(ait[i])); ++i; }
+    else { add(0.5 * (double(ait[i]) + double(bit[j]))); ++i; ++j; }
+  }
+  for (; i < an; ++i) add(0.5 * double(ait[i]));
+  for (; j < bn; ++j) add(0.5 * double(bit[j]));
+  double v = 1.0 - (2.0 * sab - double(sa) - double(sb)) / std::log(4.0);
+  return float(v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -133,6 +193,11 @@ int main(int argc, char** argv) {
   // that is submitted and not a second implementation of it.
   std::string lib_stem = argc > 5 ? argv[5] : "train";
   std::string qry_stem = argc > 6 ? argv[6] : "test";
+  // How far the precursor is allowed to be wrong, and how much being wrong
+  // costs. See the scoring loop.
+  float sigma = argc > 7 ? float(std::atof(argv[7])) : 3.0f;
+  float alpha = argc > 8 ? float(std::atof(argv[8])) : 0.1f;
+  int simmode = argc > 9 ? std::atoi(argv[9]) : 1;   // 1 entropy, 0 sqrt cosine
 
   Store tr = load(dir, lib_stem);
   Store te = load(dir, qry_stem);
@@ -169,21 +234,24 @@ int main(int argc, char** argv) {
         if (idx >= mol_ids.size()) break;
         best.clear();
 
-        // Widen the mass window until there are enough candidates to fill the
-        // answer.
+        // One window, and being near the middle of it is worth something.
         //
-        // A tight window is what made this work - at 0.2 ppm the median test
-        // molecule competes against a handful of others instead of a hundred,
-        // and MRR went from 0.084 to 0.44. But tight also means 354 of the 400
-        // molecules came back with fewer than 25 candidates and one came back
-        // with a single candidate, which throws away the twenty-four free
-        // guesses the format allows. So start tight and open up only as far as
-        // filling the list requires.
-        // A candidate found in a tighter pass keeps the rank that pass gave
-        // it: the tight window is the better evidence, and a molecule only
-        // reachable at 50 ppm belongs below one reachable at 0.2.
+        // The window used to start at 0.05 ppm and widen by 3x until 25
+        // candidates existed, with a flat penalty per widening. That was tuned
+        // on a holdout carved out of train, where it looked twenty times
+        // better than a 1 ppm window - because train's precursor_mz is
+        // calculated rather than measured (63.5% of (molecule, adduct) groups
+        // are bit-identical, p99 spread under 1 ppm), so a query matched its
+        // own library rows to the last digit. Re-run against queries carrying
+        // 3 ppm of instrument error, which is what a real test spectrum has,
+        // and the staged scheme drops from 0.481 MRR to 0.158.
+        //
+        // So the mass is evidence, not a gate: a candidate 1 ppm away is
+        // better than one 8 ppm away, and the cost should grow smoothly rather
+        // than in steps of a whole point at arbitrary 3x boundaries.
+        // Gaussian in the ppm error, which is what the error actually is.
         float ppm_used = ppm;
-        for (int pass = 0; pass < 8 && int(best.size()) < topk; ++pass) {
+        for (int pass = 0; pass < 10 && int(best.size()) < topk; ++pass) {
           for (int si : by_mol[mol_ids[idx]]) {
             const Head& q = te.head[si];
             float window = q.precursor * ppm_used * 1e-6f;
@@ -194,11 +262,14 @@ int main(int argc, char** argv) {
             for (size_t p = lo; p < hi; ++p) {
               const Head& c = tr.head[order[p]];
               if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
-              float s = cosine(te.mzs(q), te.its(q), q.n,
-                               tr.mzs(c), tr.its(c), c.n, tol);
-              // Later passes are worse evidence, so their scores sit below
-              // everything the tight passes already placed.
-              s -= float(pass);
+              float s = simmode
+                  ? entropy_sim(te.mzs(q), te.its(q), q.n, te.ent[si],
+                                tr.mzs(c), tr.its(c), c.n, tr.ent[order[p]], tol)
+                  : cosine(te.mzs(q), te.its(q), q.n,
+                           tr.mzs(c), tr.its(c), c.n, tol);
+              float dppm = (c.precursor - q.precursor) / q.precursor * 1e6f;
+              float z = dppm / sigma;
+              s -= alpha * z * z;
               auto it = best.find(c.mol);
               if (it == best.end()) best.emplace(c.mol, s);
               else it->second = std::max(it->second, s);
