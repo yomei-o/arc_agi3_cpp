@@ -8,3 +8,6 @@ recordings/
 *.json.bak
 .env
 .kaggle/
+casmi/notebook/out*/
+casmi/*.bin
+casmi/*.parquet
