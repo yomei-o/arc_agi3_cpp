@@ -73,3 +73,9 @@ target_link_libraries(SmilesParse PUBLIC GraphMol CIPLabeler)
 
 add_executable(rdkit_min_smoketest ../rdkit_smoketest.cpp)
 target_link_libraries(rdkit_min_smoketest PRIVATE SmilesParse GraphMol)
+
+add_executable(fragment_enum ../fragment_enum.cpp)
+target_link_libraries(fragment_enum PRIVATE SmilesParse GraphMol)
+
+add_executable(forward_holdout forward_holdout.cpp)
+target_link_libraries(forward_holdout PRIVATE SmilesParse GraphMol)

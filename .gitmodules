@@ -1,3 +1,0 @@
-[submodule "rdkit"]
-	path = casmi/third_party/rdkit
-	url = https://github.com/rdkit/rdkit.git
