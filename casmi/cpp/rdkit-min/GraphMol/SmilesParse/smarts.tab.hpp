@@ -1,0 +1,135 @@
+/* A Bison parser, made by GNU Bison 3.8.2.  */
+
+/* Bison interface for Yacc-like parsers in C
+
+   Copyright (C) 1984, 1989-1990, 2000-2015, 2018-2021 Free Software Foundation,
+   Inc.
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
+
+/* As a special exception, you may create a larger work that contains
+   part or all of the Bison parser skeleton and distribute that work
+   under terms of your choice, so long as that work isn't itself a
+   parser generator using the skeleton or a modified version thereof
+   as a parser skeleton.  Alternatively, if you modify or redistribute
+   the parser skeleton itself, you may (at your option) remove this
+   special exception, which will cause the skeleton and the resulting
+   Bison output files to be licensed under the GNU General Public
+   License without this special exception.
+
+   This special exception was added by the Free Software Foundation in
+   version 2.2 of Bison.  */
+
+/* DO NOT RELY ON FEATURES THAT ARE NOT DOCUMENTED in the manual,
+   especially those whose name start with YY_ or yy_.  They are
+   private implementation details that can be changed or removed.  */
+
+#ifndef YY_YYSMARTS_SCRATCH_RDKIT_GIT_CODE_GRAPHMOL_SMILESPARSE_SMARTS_TAB_HPP_INCLUDED
+# define YY_YYSMARTS_SCRATCH_RDKIT_GIT_CODE_GRAPHMOL_SMILESPARSE_SMARTS_TAB_HPP_INCLUDED
+/* Debug traces.  */
+#ifndef YYDEBUG
+# define YYDEBUG 0
+#endif
+#if YYDEBUG
+extern int yysmarts_debug;
+#endif
+
+/* Token kinds.  */
+#ifndef YYTOKENTYPE
+# define YYTOKENTYPE
+  enum yytokentype
+  {
+    YYEMPTY = -2,
+    YYEOF = 0,                     /* "end of file"  */
+    YYerror = 256,                 /* error  */
+    YYUNDEF = 257,                 /* "invalid token"  */
+    START_MOL = 258,               /* START_MOL  */
+    START_ATOM = 259,              /* START_ATOM  */
+    START_BOND = 260,              /* START_BOND  */
+    AROMATIC_ATOM_TOKEN = 261,     /* AROMATIC_ATOM_TOKEN  */
+    ORGANIC_ATOM_TOKEN = 262,      /* ORGANIC_ATOM_TOKEN  */
+    ATOM_TOKEN = 263,              /* ATOM_TOKEN  */
+    SIMPLE_ATOM_QUERY_TOKEN = 264, /* SIMPLE_ATOM_QUERY_TOKEN  */
+    COMPLEX_ATOM_QUERY_TOKEN = 265, /* COMPLEX_ATOM_QUERY_TOKEN  */
+    MIN_RINGSIZE_ATOM_QUERY_TOKEN = 266, /* MIN_RINGSIZE_ATOM_QUERY_TOKEN  */
+    RINGSIZE_ATOM_QUERY_TOKEN = 267, /* RINGSIZE_ATOM_QUERY_TOKEN  */
+    RINGBOND_ATOM_QUERY_TOKEN = 268, /* RINGBOND_ATOM_QUERY_TOKEN  */
+    IMPLICIT_H_ATOM_QUERY_TOKEN = 269, /* IMPLICIT_H_ATOM_QUERY_TOKEN  */
+    HYB_TOKEN = 270,               /* HYB_TOKEN  */
+    HETERONEIGHBOR_ATOM_QUERY_TOKEN = 271, /* HETERONEIGHBOR_ATOM_QUERY_TOKEN  */
+    ALIPHATIC = 272,               /* ALIPHATIC  */
+    ALIPHATICHETERONEIGHBOR_ATOM_QUERY_TOKEN = 273, /* ALIPHATICHETERONEIGHBOR_ATOM_QUERY_TOKEN  */
+    ZERO_TOKEN = 274,              /* ZERO_TOKEN  */
+    NONZERO_DIGIT_TOKEN = 275,     /* NONZERO_DIGIT_TOKEN  */
+    GROUP_OPEN_TOKEN = 276,        /* GROUP_OPEN_TOKEN  */
+    GROUP_CLOSE_TOKEN = 277,       /* GROUP_CLOSE_TOKEN  */
+    SEPARATOR_TOKEN = 278,         /* SEPARATOR_TOKEN  */
+    RANGE_OPEN_TOKEN = 279,        /* RANGE_OPEN_TOKEN  */
+    RANGE_CLOSE_TOKEN = 280,       /* RANGE_CLOSE_TOKEN  */
+    HASH_TOKEN = 281,              /* HASH_TOKEN  */
+    MINUS_TOKEN = 282,             /* MINUS_TOKEN  */
+    PLUS_TOKEN = 283,              /* PLUS_TOKEN  */
+    H_TOKEN = 284,                 /* H_TOKEN  */
+    AT_TOKEN = 285,                /* AT_TOKEN  */
+    PERCENT_TOKEN = 286,           /* PERCENT_TOKEN  */
+    ATOM_OPEN_TOKEN = 287,         /* ATOM_OPEN_TOKEN  */
+    ATOM_CLOSE_TOKEN = 288,        /* ATOM_CLOSE_TOKEN  */
+    NOT_TOKEN = 289,               /* NOT_TOKEN  */
+    AND_TOKEN = 290,               /* AND_TOKEN  */
+    OR_TOKEN = 291,                /* OR_TOKEN  */
+    SEMI_TOKEN = 292,              /* SEMI_TOKEN  */
+    BEGIN_RECURSE = 293,           /* BEGIN_RECURSE  */
+    END_RECURSE = 294,             /* END_RECURSE  */
+    COLON_TOKEN = 295,             /* COLON_TOKEN  */
+    UNDERSCORE_TOKEN = 296,        /* UNDERSCORE_TOKEN  */
+    BOND_TOKEN = 297,              /* BOND_TOKEN  */
+    CHI_CLASS_TOKEN = 298,         /* CHI_CLASS_TOKEN  */
+    BAD_CHARACTER = 299,           /* BAD_CHARACTER  */
+    EOS_TOKEN = 300                /* EOS_TOKEN  */
+  };
+  typedef enum yytokentype yytoken_kind_t;
+#endif
+
+/* Value type.  */
+#if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
+union YYSTYPE
+{
+
+  int                      moli;
+  RDKit::QueryAtom * atom;
+  RDKit::QueryBond * bond;
+  RDKit::Atom::ChiralType chiraltype;
+  int                      ival;
+
+
+};
+typedef union YYSTYPE YYSTYPE;
+# define YYSTYPE_IS_TRIVIAL 1
+# define YYSTYPE_IS_DECLARED 1
+#endif
+
+
+
+
+int yysmarts_parse (const char *input, std::vector<RDKit::RWMol *> *molList, RDKit::Atom* &lastAtom, RDKit::Bond* &lastBond, unsigned &numAtomsParsed, unsigned &numBondsParsed, std::vector<std::pair<unsigned int, unsigned int>>& branchPoints, void *scanner, int& start_token, unsigned int& current_token_position);
+
+/* "%code provides" blocks.  */
+
+#ifndef YY_DECL
+#define YY_DECL int yylex \
+               (YYSTYPE * yylval_param , yyscan_t yyscanner, int& start_token, unsigned int& current_token_position)
+#endif
+
+
+#endif /* !YY_YYSMARTS_SCRATCH_RDKIT_GIT_CODE_GRAPHMOL_SMILESPARSE_SMARTS_TAB_HPP_INCLUDED  */
