@@ -13,11 +13,16 @@
 // Usage:
 //   forward_holdout <dir> <qry_stem> <ppm> [max_queries] [h_shift_decay]
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <GraphMol/GraphMol.h>
@@ -153,58 +158,96 @@ int main(int argc, char** argv) {
   forward_model::Params fp;
   fp.hShiftDecay = hShiftDecay;
 
-  int nTested = 0, nFoundTop1 = 0, nFoundTop5 = 0, nHadDecoys = 0;
-  double mrrSum = 0.0;
+  // Force the PeriodicTable singleton to initialise here, single-threaded -
+  // its first call racing from multiple worker threads at once would be a
+  // data race on construction.
+  RDKit::PeriodicTable::getTable();
 
-  for (size_t qi = 0; qi < qry.head.size() && nTested < maxQueries; ++qi) {
-    const Head& q = qry.head[qi];
-    const std::string& truthSmi = qry.smiles[q.mol];
-    if (truthSmi.empty()) continue;
+  // Group spectra by molecule - a molecule's several spectra are evidence
+  // about the same candidate list, aggregated by max score per candidate,
+  // the same role by_mol plays in match.cpp. This also means a candidate's
+  // predicted spectrum (the expensive part - fragment enumeration) is built
+  // once per molecule rather than once per spectrum.
+  std::unordered_map<int, std::vector<int>> byMol;
+  for (size_t i = 0; i < qry.head.size(); ++i) byMol[qry.head[i].mol].push_back(int(i));
+  std::vector<int> molIds;
+  for (auto& kv : byMol) molIds.push_back(kv.first);
+  size_t molLimit = std::min(molIds.size(), size_t(maxQueries));
 
-    int adductIdx = q.tag < 0 ? -1 : q.tag / 16;
-    float shift = (adductIdx >= 0 && adductIdx < 10) ? ADDUCT_SHIFT[adductIdx] : 1.007276f;
-    float neutral = q.precursor - shift;
-    float window = neutral * ppm * 1e-6f;
-    size_t lo = std::lower_bound(sortedMass.begin(), sortedMass.end(), neutral - window) - sortedMass.begin();
-    size_t hi = std::upper_bound(sortedMass.begin(), sortedMass.end(), neutral + window) - sortedMass.begin();
-    if (hi <= lo) continue;
+  std::atomic<size_t> next(0);
+  std::atomic<int> nTested(0), nFoundTop1(0), nFoundTop5(0), nHadDecoys(0);
+  std::atomic<long long> mrrSumMilli(0);  // MRR*1e6, summed as integer for atomicity
+  std::mutex printMutex;
 
-    ++nTested;
-    std::vector<std::pair<float, bool>> ranked;  // score, is_truth
-    for (size_t p = lo; p < hi; ++p) {
-      int idx = order[p];
-      const std::string& smi = pool.smiles[idx];
-      if (smi.empty()) continue;
-      std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smi));
-      if (!mol) continue;
-      auto pred = forward_model::predictSpectrum(*mol, fp);
-      float s = cosine(pred, qry.mzs(q), qry.its(q), q.n, 0.01f);
-      ranked.emplace_back(s, smi == truthSmi);
-    }
-    if (ranked.size() < 2) continue;  // no decoys, nothing to resolve
-    ++nHadDecoys;
-    std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b) { return a.first > b.first; });
-    for (size_t r = 0; r < ranked.size(); ++r) {
-      if (ranked[r].second) {
-        mrrSum += 1.0 / double(r + 1);
-        if (r == 0) ++nFoundTop1;
-        if (r < 5) ++nFoundTop5;
-        break;
+  unsigned nthread = std::max(1u, std::thread::hardware_concurrency());
+  std::vector<std::thread> pool_threads;
+  for (unsigned t = 0; t < nthread; ++t) {
+    pool_threads.emplace_back([&]() {
+      for (;;) {
+        size_t mi = next++;
+        if (mi >= molLimit) break;
+        int molId = molIds[mi];
+        const std::string& truthSmi = qry.smiles[molId];
+        if (truthSmi.empty()) continue;
+
+        // Union of candidate ranges across all of this molecule's spectra -
+        // different spectra can carry different adducts/precursor m/z.
+        std::set<int> candIdx;
+        for (int qi : byMol[molId]) {
+          const Head& q = qry.head[qi];
+          int adductIdx = q.tag < 0 ? -1 : q.tag / 16;
+          float shift = (adductIdx >= 0 && adductIdx < 10) ? ADDUCT_SHIFT[adductIdx] : 1.007276f;
+          float neutral = q.precursor - shift;
+          float window = neutral * ppm * 1e-6f;
+          size_t lo = std::lower_bound(sortedMass.begin(), sortedMass.end(), neutral - window) - sortedMass.begin();
+          size_t hi = std::upper_bound(sortedMass.begin(), sortedMass.end(), neutral + window) - sortedMass.begin();
+          for (size_t p = lo; p < hi; ++p) candIdx.insert(order[p]);
+        }
+        if (candIdx.empty()) continue;
+        ++nTested;
+
+        std::vector<std::pair<float, bool>> ranked;  // score, is_truth
+        for (int idx : candIdx) {
+          const std::string& smi = pool.smiles[idx];
+          if (smi.empty()) continue;
+          std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smi));
+          if (!mol) continue;
+          auto pred = forward_model::predictSpectrum(*mol, fp);
+          float best = 0.0f;
+          for (int qi : byMol[molId]) {
+            const Head& q = qry.head[qi];
+            best = std::max(best, cosine(pred, qry.mzs(q), qry.its(q), q.n, 0.01f));
+          }
+          ranked.emplace_back(best, smi == truthSmi);
+        }
+        if (ranked.size() < 2) continue;  // no decoys, nothing to resolve
+        ++nHadDecoys;
+        std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        int rank = -1;
+        for (size_t r = 0; r < ranked.size(); ++r) {
+          if (ranked[r].second) { rank = int(r); break; }
+        }
+        if (rank >= 0) {
+          mrrSumMilli += llround(1e6 / double(rank + 1));
+          if (rank == 0) ++nFoundTop1;
+          if (rank < 5) ++nFoundTop5;
+        }
+        std::lock_guard<std::mutex> lk(printMutex);
+        std::printf("  [mol %d] spectra=%zu candidates=%zu truth_rank=%s\n",
+                    molId, byMol[molId].size(), ranked.size(),
+                    rank >= 0 ? std::to_string(rank + 1).c_str() : "not-found");
       }
-    }
-    std::printf("  [%zu] candidates=%zu truth_rank=%s\n", qi, ranked.size(),
-                [&]() {
-                  for (size_t r = 0; r < ranked.size(); ++r)
-                    if (ranked[r].second) return std::to_string(r + 1);
-                  return std::string("not-found");
-                }().c_str());
+    });
   }
+  for (auto& th : pool_threads) th.join();
 
-  std::printf("\ntested %d queries with >=1 decoy (of %d with any candidates)\n", nHadDecoys, nTested);
-  if (nHadDecoys > 0) {
+  std::printf("\ntested %d queries with >=1 decoy (of %d with any candidates)\n",
+              nHadDecoys.load(), nTested.load());
+  if (nHadDecoys.load() > 0) {
     std::printf("top1 %.1f%%  top5 %.1f%%  MRR %.3f\n",
-                100.0 * nFoundTop1 / nHadDecoys, 100.0 * nFoundTop5 / nHadDecoys,
-                mrrSum / nHadDecoys);
+                100.0 * nFoundTop1.load() / nHadDecoys.load(),
+                100.0 * nFoundTop5.load() / nHadDecoys.load(),
+                double(mrrSumMilli.load()) / 1e6 / nHadDecoys.load());
   }
   return 0;
 }
