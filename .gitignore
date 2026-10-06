@@ -13,3 +13,6 @@ casmi/notebook/lb/
 casmi/notebook/out*/
 environment_files/
 recordings/
+arc/third_party/*.zip
+arc/third_party/*.tgz
+arc/third_party/*.tar.gz
