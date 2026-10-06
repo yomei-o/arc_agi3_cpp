@@ -62,8 +62,25 @@ RDKitの `CMakeLists.txt` はほぼ全モジュールを `add_subdirectory` で*
 5. **`configure_rdkit.bat` → `build_rdkit.bat` の順に実行。**
    両方ともこのディレクトリに置いてある。パスはすべて `C:\prog\...` 前提
    （ビルドマシン固有。別の場所に置くならバッチ内のパスを書き換える）。
-   `build_rdkit.bat` は `ninja install` まで実行し、
-   `C:\prog\rdkit-install\` にヘッダと `.lib`/`.dll` 一式が入る。
+
+   `-DCMAKE_INSTALL_PREFIX=C:/prog/rdkit-install` を渡しているが、
+   **`RDK_INSTALL_INTREE` がデフォルト `ON`（"former behavior"）で、これが
+   `CMAKE_INSTALL_PREFIX` より優先される。** そのため実際のインストール先は
+   指定したプレフィックスではなく、ソースツリー自身:
+   - ヘッダ: `C:\prog\rdkit-Release_2026_03_1\Code\` 以下にそのまま
+     （例 `Code/GraphMol/ROMol.h`, `Code/GraphMol/SmilesParse/SmilesParse.h`）
+   - ライブラリ: `C:\prog\rdkit-Release_2026_03_1\lib\*.lib`（66個、約477MB）
+   - CMake config: `C:\prog\rdkit-Release_2026_03_1\lib\cmake\rdkit\rdkit-config.cmake`
+     （`find_package(rdkit CONFIG)` で拾える）
+
+   `RDK_INSTALL_INTREE=OFF` を渡せば `CMAKE_INSTALL_PREFIX` 通りの場所に
+   綺麗にインストールできるはず（未検証）。今回は動作確認を優先してそのまま使った。
+
+6. **ビルド中に出た問題と対処**: `External/ChemDraw`（Revvity ChemDraw文書
+   形式サポート）が未定義識別子 `kUnicodeCodePointCenterDot` でMSVCコンパイル
+   エラーになった。うちの用途に不要な機能で、公式オプション
+   `RDK_BUILD_CHEMDRAW_SUPPORT` があったので `OFF` にして回避
+   （`configure_rdkit.bat` に反映済み）。
 
 ## 実際に使っている boost ヘッダ（次に最小構成でやり直すときのメモ）
 
