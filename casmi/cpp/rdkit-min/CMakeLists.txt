@@ -79,3 +79,6 @@ target_link_libraries(fragment_enum PRIVATE SmilesParse GraphMol)
 
 add_executable(forward_holdout forward_holdout.cpp)
 target_link_libraries(forward_holdout PRIVATE SmilesParse GraphMol)
+
+add_executable(forward_rerank forward_rerank.cpp)
+target_link_libraries(forward_rerank PRIVATE SmilesParse GraphMol)

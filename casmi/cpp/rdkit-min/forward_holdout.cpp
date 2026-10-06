@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
   float ppm = argc > 3 ? float(std::atof(argv[3])) : 20.0f;
   int maxQueries = argc > 4 ? std::atoi(argv[4]) : 30;
   double hShiftDecay = argc > 5 ? std::atof(argv[5]) : 1.0;
+  int maxHShift = argc > 6 ? std::atoi(argv[6]) : 2;
 
   Store qry = loadSpectra(dir, qryStem);
   Pool pool = loadPool(dir);
@@ -157,6 +158,7 @@ int main(int argc, char** argv) {
 
   forward_model::Params fp;
   fp.hShiftDecay = hShiftDecay;
+  fp.maxHShift = maxHShift;
 
   // Force the PeriodicTable singleton to initialise here, single-threaded -
   // its first call racing from multiple worker threads at once would be a
