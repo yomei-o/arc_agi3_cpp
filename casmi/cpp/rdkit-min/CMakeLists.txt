@@ -82,3 +82,56 @@ target_link_libraries(forward_holdout PRIVATE SmilesParse GraphMol)
 
 add_executable(forward_rerank forward_rerank.cpp)
 target_link_libraries(forward_rerank PRIVATE SmilesParse GraphMol)
+
+add_executable(pubchem_parse pubchem_parse.cpp)
+target_link_libraries(pubchem_parse PRIVATE SmilesParse GraphMol)
+
+add_executable(smiles_scan smiles_scan.cpp)
+target_link_libraries(smiles_scan PRIVATE SmilesParse GraphMol)
+
+add_executable(pool_recall_check pool_recall_check.cpp)
+target_link_libraries(pool_recall_check PRIVATE SmilesParse GraphMol)
+
+# Tiny dependency-free autograd engine (vendored from yomei-o/mini-yolov5-cpp's
+# scratch/, Adam optimizer ported from yomei-o/yolov8_cpp's pure/optim.hpp) -
+# used to learn the forward model's fragment-intensity weighting instead of
+# the hand-tuned exp(-decay*k^2) rule. See casmi/cpp/autograd/.
+add_library(autograd STATIC ../autograd/autograd.cpp ../autograd/nn_ops.cpp)
+target_include_directories(autograd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_executable(train_forward_model_nn train_forward_model_nn.cpp)
+target_link_libraries(train_forward_model_nn PRIVATE SmilesParse GraphMol autograd)
+
+add_executable(train_forward_model_rank train_forward_model_rank.cpp)
+target_link_libraries(train_forward_model_rank PRIVATE SmilesParse GraphMol autograd)
+
+add_executable(forward_holdout_nn forward_holdout_nn.cpp)
+target_link_libraries(forward_holdout_nn PRIVATE SmilesParse GraphMol autograd)
+
+add_executable(forward_rerank_nn forward_rerank_nn.cpp)
+target_link_libraries(forward_rerank_nn PRIVATE SmilesParse GraphMol autograd)
+
+add_executable(pool_candidate_rank pool_candidate_rank.cpp)
+target_link_libraries(pool_candidate_rank PRIVATE SmilesParse GraphMol autograd)
+
+# Reverse model (spectrum -> fingerprint) data prep: ECFP on-bits per molecule.
+add_executable(fp_prep ../rev/fp_prep.cpp)
+target_link_libraries(fp_prep PRIVATE SmilesParse GraphMol)
+
+# Runtime candidate retrieval: whole-PubChem window + pool, reverse-model scored.
+add_executable(cand_rank ../rev/cand_rank.cpp)
+target_link_libraries(cand_rank PRIVATE SmilesParse GraphMol)
+
+# Cascade stage 2: forward-MLP rescoring + score fusion over cand_rank's shortlist.
+add_executable(fwd_rescore fwd_rescore.cpp)
+target_link_libraries(fwd_rescore PRIVATE SmilesParse GraphMol autograd)
+
+# Molecular formula from MS/MS by sub-formula explanation of fragment peaks
+# (no training data).
+add_executable(formula_infer formula_infer.cpp)
+target_link_libraries(formula_infer PRIVATE SmilesParse GraphMol)
+
+# Physics-shaped fragment intensities (bond-class barriers, proton-affinity
+# charge retention, H-shift weights), fitted by coordinate search.
+add_executable(phys_rank phys_rank.cpp)
+target_link_libraries(phys_rank PRIVATE SmilesParse GraphMol autograd)

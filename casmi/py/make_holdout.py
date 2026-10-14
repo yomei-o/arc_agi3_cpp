@@ -51,6 +51,36 @@ N_MOL = 400
 MZ_LO, MZ_HI = 245.0, 461.0
 RNG = np.random.default_rng(12345)
 
+
+def _opt(name: str) -> str | None:
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+        if a == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return None
+
+
+# --keys FILE restricts the held-out molecules to the InChIKey14s listed in
+# FILE (one per line). dqry, drawn by the timsTOF/245-461 filter below to
+# match the visible test, turned out to share not one molecule with COCONUT
+# although 9.5% of train does: the filter picks Enveda's synthetic
+# drug-like library, while the hidden answers are expected to be natural
+# products. --keys coconut_keys.txt gives a holdout of those instead.
+# --any-instr drops the timsTOF/mass eligibility filter (there may be too few
+# timsTOF natural products), and --prefix LIB,QRY names the outputs.
+KEYS_FILE = _opt("--keys")
+# --n N and --seed S: holdout size and draw (defaults 400 / 12345, which
+# reproduce every holdout built before these options existed).
+if _opt("--n"):
+    N_MOL = int(_opt("--n"))
+if _opt("--seed"):
+    RNG = np.random.default_rng(int(_opt("--seed")))
+ANY_INSTR = "--any-instr" in sys.argv
+if _opt("--prefix"):
+    PREFIX, QPREFIX = _opt("--prefix").split(",")
+args = [a for a in args if a not in (KEYS_FILE, _opt("--prefix"), _opt("--n"), _opt("--seed"))]
+
 # Precursor jitter, in ppm, added to the query spectra only.
 #
 # Without this the holdout cannot see the biggest mistake it is capable of
@@ -113,13 +143,16 @@ def main() -> None:
     for b in f.iter_batches(batch_size=300000,
                             columns=["inchikey14", "precursor_mz", "instrument_type"]):
         d = b.to_pandas()
-        ok = ((d.instrument_type == "timsTOF")
-              & d.precursor_mz.between(MZ_LO, MZ_HI)
-              & d.inchikey14.notna())
+        ok = d.inchikey14.notna()
+        if not ANY_INSTR:
+            ok = ok & (d.instrument_type == "timsTOF") & d.precursor_mz.between(MZ_LO, MZ_HI)
         for k in d.inchikey14[ok]:
             seen[k] = seen.get(k, 0) + 1
     # The real test averages three spectra per molecule; ask for at least two.
     pool = [k for k, n in seen.items() if n >= 2]
+    if KEYS_FILE:
+        allow = set(Path(KEYS_FILE).read_text().split())
+        pool = sorted(k for k in pool if k in allow)
     print(f"mode {MODE}; jitter {JITTER_PPM} ppm; eligible molecules: {len(pool)}")
     held = set(RNG.choice(pool, size=min(N_MOL, len(pool)), replace=False))
 
@@ -171,7 +204,7 @@ def main() -> None:
             pmz = float(r.precursor_mz) if r.precursor_mz == r.precursor_mz else 0.0
             smi = r.normalized_smiles if isinstance(r.normalized_smiles, str) else ""
 
-            eligible = (r.instrument_type == "timsTOF" and MZ_LO <= pmz <= MZ_HI)
+            eligible = ANY_INSTR or (r.instrument_type == "timsTOF" and MZ_LO <= pmz <= MZ_HI)
             if key in held:
                 if key not in max_q_for:
                     cap = MAX_Q if MODE == "denovo" else min(MAX_Q, seen.get(key, 1) - 1)

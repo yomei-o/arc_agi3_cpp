@@ -118,6 +118,19 @@ std::string formulaKey(const RDKit::ROMol& mol) {
   return key.str();
 }
 
+// RDKit's sanitization legitimately throws on invalid structures (e.g. a
+// polyphosphate written with plain "=O" bonds that gives one P a valence of
+// 6); an uncaught throw here would kill the whole job over one bad
+// candidate, confirmed against a real pool entry while debugging
+// pubchem_parse.cpp.
+RDKit::RWMol* safeParse(const std::string& smi) {
+  try {
+    return RDKit::SmilesToMol(smi);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
 std::vector<std::string> splitCandidates(const std::string& cell) {
   std::vector<std::string> out;
   size_t start = 0;
@@ -193,7 +206,7 @@ int main(int argc, char** argv) {
         std::unordered_map<std::string, std::vector<size_t>> groups;
         for (size_t c = 0; c < cands.size(); ++c) {
           if (cands[c].empty()) continue;
-          mols[c].reset(RDKit::SmilesToMol(cands[c]));
+          mols[c].reset(safeParse(cands[c]));
           if (!mols[c]) continue;
           groups[formulaKey(*mols[c])].push_back(c);
         }

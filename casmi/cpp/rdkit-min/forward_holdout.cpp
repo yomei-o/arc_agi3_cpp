@@ -122,6 +122,18 @@ constexpr float ADDUCT_SHIFT[10] = {
     34.969402f, 44.998201f, -17.002740f, 1.007276f, 22.989218f,
 };
 
+// RDKit's sanitization legitimately throws on invalid structures (confirmed
+// against a real pool entry - see RESUME.md); an uncaught throw here would
+// kill the whole holdout run over one bad pool candidate, now a much likelier
+// event against the PubChem-derived expansion of pool_head.bin.
+RDKit::RWMol* safeParse(const std::string& smi) {
+  try {
+    return RDKit::SmilesToMol(smi);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
 float cosine(const std::vector<std::pair<double, double>>& pred,
              const float* mz, const float* it, int n, float tol) {
   double dot = 0.0, na = 0.0, nb = 0.0;
@@ -212,7 +224,7 @@ int main(int argc, char** argv) {
         for (int idx : candIdx) {
           const std::string& smi = pool.smiles[idx];
           if (smi.empty()) continue;
-          std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smi));
+          std::unique_ptr<RDKit::RWMol> mol(safeParse(smi));
           if (!mol) continue;
           auto pred = forward_model::predictSpectrum(*mol, fp);
           float best = 0.0f;

@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.14)
+project(fpnet_ggml C CXX)
+set(CMAKE_CXX_STANDARD 17)
+# ggml = llama.cpp's bundled ggml (GGML_VERSION 0.24.0, llama.cpp tree of 2026-09-18), copied to ./ggml
+set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_AVX2 ON CACHE BOOL "" FORCE)
+set(GGML_FMA ON CACHE BOOL "" FORCE)
+set(GGML_F16C ON CACHE BOOL "" FORCE)
+add_subdirectory(ggml)
+add_executable(fpnet_ggml fpnet_ggml.cpp)
+target_link_libraries(fpnet_ggml PRIVATE ggml ggml-cpu)
+# pool scoring companion (no ggml): cand_fp . molecule logits for every pool candidate in the mass window
+add_executable(fpnet_pool fpnet_pool.cpp)

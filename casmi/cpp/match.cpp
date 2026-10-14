@@ -46,8 +46,19 @@ struct Store {
 
   const float* mzs(const Head& h) const { return mz.data() + h.off; }
   const float* its(const Head& h) const { return inten.data() + h.off; }
-  int adduct(const Head& h) const { return h.tag < 0 ? -1 : h.tag / 16; }
-  int instr(const Head& h) const { return h.tag < 0 ? -1 : h.tag % 16; }
+  // tag = adduct*16 + instrument with -1 for unknowns corrupts when only the
+  // instrument is unknown: adduct a -> 16a-1, read back as adduct a-1 /
+  // instrument 15. Instrument 15 arises no other way (5 instruments exist),
+  // so it identifies the case. ~10% of train uses instrument names outside
+  // the 5-name vocabulary; a hidden test set might too.
+  int adduct(const Head& h) const {
+    if (h.tag < 0) return -1;
+    return h.tag % 16 == 15 ? h.tag / 16 + 1 : h.tag / 16;
+  }
+  int instr(const Head& h) const {
+    if (h.tag < 0) return h.tag >= -16 ? h.tag + 16 : -1;
+    return h.tag % 16 == 15 ? -1 : h.tag % 16;
+  }
 };
 
 std::vector<char> slurp(const std::string& path) {
@@ -283,6 +294,13 @@ int main(int argc, char** argv) {
   // guarantees almost by construction and so cannot tell a confident Class-1
   // hit apart from 25 slots padded out with whatever the loosest pass found.
   std::vector<int> tight_count(mol_ids.size(), 0);
+  // Best candidate score per molecule: the signal for "is the answer even in
+  // the library". On the denovo holdout (answer absent) the top hit is
+  // always a wrong neighbour; on the sibling holdout it is usually the
+  // answer itself - the merge with the reverse model's denovo candidates
+  // needs to tell those two apart, and tight_count alone cannot.
+  std::vector<float> best_score(mol_ids.size(), -1e9f);
+  std::vector<int> top1_correct(mol_ids.size(), 0);
   unsigned nthread = std::max(1u, std::thread::hardware_concurrency());
   std::vector<std::thread> pool;
   std::atomic<size_t> next(0);
@@ -325,9 +343,10 @@ int main(int argc, char** argv) {
                                          q.precursor + window) - keys.begin();
             for (size_t p = lo; p < hi; ++p) {
               const Head& c = tr.head[order[p]];
-              if (q.tag >= 0 && c.tag >= 0 && te.adduct(q) != tr.adduct(c)) continue;
-              bool same_instr = q.tag >= 0 && c.tag >= 0 && te.instr(q) == tr.instr(c);
-              if (instr_mode == 2 && q.tag >= 0 && c.tag >= 0 && !same_instr) continue;
+              int aq = te.adduct(q), ac = tr.adduct(c), iq = te.instr(q), ic = tr.instr(c);
+              if (aq >= 0 && ac >= 0 && aq != ac) continue;
+              bool same_instr = iq >= 0 && ic >= 0 && iq == ic;
+              if (instr_mode == 2 && iq >= 0 && ic >= 0 && !same_instr) continue;
               const float* qmz = merge_mode ? merged.mz.data() : te.mzs(q);
               const float* qit = merge_mode ? merged.it.data() : te.its(q);
               int qn = merge_mode ? int(merged.mz.size()) : q.n;
@@ -373,6 +392,8 @@ int main(int argc, char** argv) {
             hit_rank[idx] = placed;
         }
         answer[idx] = out;
+        if (!rank.empty()) best_score[idx] = rank[0].first;
+        top1_correct[idx] = hit_rank[idx] == 1;
       }
     });
   }
@@ -389,6 +410,11 @@ int main(int argc, char** argv) {
   tc << "molecule_id,tight_count\n";
   for (size_t i = 0; i < mol_ids.size(); ++i)
     tc << te.name[mol_ids[i]] << ',' << tight_count[i] << '\n';
+
+  std::ofstream bs(dir + "/best_score.csv");
+  bs << "molecule_id,best_score,top1_correct\n";
+  for (size_t i = 0; i < mol_ids.size(); ++i)
+    bs << te.name[mol_ids[i]] << ',' << best_score[i] << ',' << top1_correct[i] << '\n';
 
   int found = 0;
   for (int r : hit_rank) found += (r > 0);
