@@ -34,6 +34,9 @@ XTB = os.environ.get("XTB_EXE", r"C:\prog\xtb\xtb-6.7.1\bin\xtb.exe")
 HARTREE = 627.509
 STRETCH, NSTEP = 2.0, 16
 OUTDIR = os.environ.get("TS_GEO_DIR", r"C:\prog\casmi\ts_scan_geo")
+# TS_CLASSES=aryl-C,C-C restricts the scans to those bond classes; TS_SKIP=n skips the first n shuffled molecules
+ONLY = set(c for c in os.environ.get("TS_CLASSES", "").split(",") if c)
+SKIP = int(os.environ.get("TS_SKIP", "0"))
 
 
 def has_double_o(c):
@@ -191,7 +194,7 @@ def jobs_for(name, smi, per_class, rnd):
         if ri.NumBondRings(b.GetIdx()) or b.GetBondType() != Chem.BondType.SINGLE:
             continue
         cls = bond_class(m, b)
-        if cls == "other":
+        if cls == "other" or (ONLY and cls not in ONLY):
             continue
         site = protonation_site(m, b)
         if site is None:
@@ -212,7 +215,7 @@ def main():
     rows = [l.rstrip("\r\n").split("\t") for l in open(mols, encoding="utf-8")]
     rnd.shuffle(rows)
     jobs = []
-    for name, smi in rows[:n]:
+    for name, smi in rows[SKIP:SKIP + n]:
         jobs += jobs_for(name, smi, per_class, rnd)
     print(f"{len(jobs)} scans from {n} molecules", flush=True)
     cols = "name smiles cls i j prot E0 Emax Eend kmax barrier reaction plateau".split()
