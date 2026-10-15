@@ -1,0 +1,20 @@
+molecules with [M+H]+ spectra 470
+bonds 4142 from 436 molecules
+class            n  obs% AUC glob  AUC loc AUC form  (AUC of -dE for 'fragment seen')
+acyl           300  56.7    0.481    0.462    0.484
+glycosidic      53  62.3    0.406    0.502    0.479
+C-het         1692  38.3    0.518    0.504    0.479
+aryl-C         474  57.2    0.629    0.629    0.690
+C-C           1486  34.9    0.529    0.529    0.476
+other          116  26.7    0.350    0.410    0.389
+C-glyc          21  81.0    0.588    0.588    0.397
+all           4142  40.8    0.509    0.516    0.467
+within-molecule mean AUC (glob): 0.554 over 354 molecules
+within-molecule mean AUC (loc): 0.570 over 354 molecules
+within-molecule mean AUC (form): 0.481 over 354 molecules
+charge side (one side seen): QM directional energy picks the seen side 930/1424 = 0.653
+  side predictor size : 840/1403 = 0.599
+  side predictor pa   : 870/1423 = 0.611
+  side predictor form : 910/1423 = 0.639
+  side predictor qm   : 930/1424 = 0.653
+  where size and QM disagree, QM right 212/344 = 0.616

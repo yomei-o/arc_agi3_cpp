@@ -1,0 +1,114 @@
+molecules ok: 1357
+
+PA sites: 13301, proton moved during opt 1796, used 11505
+PA formula R2 0.444  RMSE 12.73 kcal/mol
+  PA = T[type] + 7.48*ln(nheavy/30) + 5.42*donors_o/p (aromatic C)
+  T[N_pyridine   ] =    69.1   n=  323  median obs   67.8  resid sd   9.9
+  T[N_pyrrole    ] =    30.9   n=  232  median obs   29.7  resid sd  14.9
+  T[N_amide      ] =    38.5   n=  398  median obs   37.1  resid sd  12.3
+  T[N_aniline    ] =    49.4   n=  103  median obs   47.1  resid sd  14.4
+  T[N_imine      ] =    71.1   n=  150  median obs   69.8  resid sd  13.5
+  T[N_amine1     ] =    56.3   n=   83  median obs   52.9  resid sd  10.9
+  T[N_amine2     ] =    60.0   n=   62  median obs   59.6  resid sd  11.9
+  T[N_amine3     ] =    66.0   n=  129  median obs   65.3  resid sd   8.9
+  T[N_other      ] =    43.1   n=   25  median obs   41.2  resid sd  23.7
+  T[O_amideCO    ] =    59.4   n=  513  median obs   58.7  resid sd   9.6
+  T[O_esterCO    ] =    51.8   n=  535  median obs   50.8  resid sd  12.5
+  T[O_acidCO     ] =    43.6   n=  271  median obs   40.1  resid sd  13.7
+  T[O_ketone     ] =    48.7   n=   90  median obs   48.1  resid sd   9.1
+  T[O_ketoneConj ] =    65.7   n=  339  median obs   64.8  resid sd  11.3
+  T[O_alcohol    ] =    38.0   n= 1301  median obs   37.4  resid sd  14.4
+  T[O_ether      ] =    35.4   n=  149  median obs   37.1  resid sd  10.4
+  T[O_ringEther  ] =    33.4   n=  340  median obs   34.8  resid sd  11.4
+  T[O_phenol     ] =    28.5   n=  575  median obs   25.0  resid sd  20.6
+  T[O_arylEther  ] =    31.5   n=  712  median obs   31.4  resid sd  10.7
+  T[O_esterSingle] =    22.9   n=  669  median obs   21.9  resid sd  13.2
+  T[O_arom       ] =    22.3   n=  207  median obs   20.1  resid sd  10.4
+  T[O_other      ] =    44.6   n=  267  median obs   45.5  resid sd  18.9
+  T[S            ] =    39.2   n=   98  median obs   37.5  resid sd  11.1
+  T[C_arom       ] =    40.0   n= 3934  median obs   42.3  resid sd  11.0
+
+directional cuts: 28116 from 1344 molecules
+finite and sane: 28116
+class means only: R2 0.125
+directional formula (25 terms): R2 0.833  RMSE 30.9
+  1             30.84
+  a_N           29.22
+  a_O           74.45
+  a_S           13.92
+  a_ar          34.90
+  a_acyl         5.33
+  a_deg0       112.15
+  a_deg2         7.83
+  a_deg3         4.74
+  a_alphaO       0.85
+  a_alphaN      -8.21
+  a_benzyl     -18.32
+  a_allyl       -6.32
+  a_alphaCO    -10.60
+  a_ring         0.90
+  a_dblC        25.09
+  b_N          -25.95
+  b_O          -18.77
+  b_S          -17.31
+  b_ar           7.33
+  b_CO           8.27
+  paB            0.72
+  paMax          0.49
+  lnA           -7.67
+  lnB            4.11
+
+bond level (min over directions): 14058 bonds, R2 0.121
+  class means only R2 0.153;  formula within-class R2 (after class means) 0.020
+  class            n  median     sd resid sd
+  acyl           992    62.4   18.3     16.8
+  glycosidic     209    51.0   15.3     13.5
+  C-het         5101    62.7   24.8     24.8
+  aryl-C        1266    71.4   24.4     19.5
+  C-C           6039    46.9   19.6     20.0
+  other          404    74.9   40.4     43.3
+  C-glyc          47    52.8   15.1     13.4
+  direction (which side keeps the charge) agreement 11807/14058 = 0.840
+  local-ref heterolysis acyl       n= 831 median   26.8
+  local-ref heterolysis glycosidic n= 181 median   28.4
+  local-ref heterolysis C-het      n=4390 median   45.9
+bond-level reference: global
+
+bond-level formula (fit on preferred-direction rows, applied in formula direction): 14058 bonds, R2 0.378  RMSE 19.5
+  2-fold CV by molecule: R2 0.374
+  class means only R2 0.153;  class means + formula deviation: R2 0.398
+  class            n  QMmed  QMsd  resid  corr
+  acyl           992   62.4  18.3   15.6  0.53
+  glycosidic     209   51.0  15.3   12.8  0.56
+  C-het         5101   62.7  24.8   19.1  0.64
+  aryl-C        1266   71.4  24.4   18.8  0.64
+  C-C           6039   46.9  19.6   17.2  0.49
+  other          404   74.9  40.4   44.2 -0.02
+  C-glyc          47   52.8  15.1   15.1  0.19
+  bond-level coefficients:
+    1             20.11
+    a_N            2.39
+    a_O            4.34
+    a_S            8.53
+    a_ar          33.47
+    a_acyl         4.39
+    a_deg0       105.85
+    a_deg2        -4.82
+    a_deg3       -12.41
+    a_alphaO       2.61
+    a_alphaN      -6.95
+    a_benzyl      -1.73
+    a_allyl       -8.79
+    a_alphaCO      0.94
+    a_ring         1.35
+    a_dblC        21.90
+    b_N            9.50
+    b_O            4.15
+    b_S           -1.48
+    b_ar           7.14
+    b_CO           0.41
+    paB            0.09
+    paMax          0.57
+    lnA           -1.60
+    lnB            1.01
+wrote fqry_coef.txt
