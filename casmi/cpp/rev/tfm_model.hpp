@@ -145,6 +145,31 @@ inline void gemm(bool ta, bool tb, int M, int N, int K, real alpha, const real* 
   ::parallel_for(int64_t(batch) * M, [&](int64_t bm) {
     int64_t bi = bm / M; int m = int(bm % M);
     const real* a = A + bi * sA; const real* b = B + bi * sB; real* c = C + bi * sC + int64_t(m) * ldc;
+    if (!ta) {
+      // CPU inference path: contiguous rows of A (and of B or B^T), so the
+      // inner loops run over unit strides (the naive loop below strides B by ldb)
+      const real* ar = a + int64_t(m) * lda;
+      if (!tb) {
+        thread_local std::vector<real> acc;
+        acc.assign(size_t(N), real(0));
+        real* ac = acc.data();
+        for (int k = 0; k < K; ++k) {
+          const real av = ar[k];
+          if (av == real(0)) continue;
+          const real* br = b + int64_t(k) * ldb;
+          for (int n = 0; n < N; ++n) ac[n] += av * br[n];
+        }
+        for (int n = 0; n < N; ++n) c[n] = alpha * ac[n] + (beta == real(0) ? real(0) : beta * c[n]);
+      } else {
+        for (int n = 0; n < N; ++n) {
+          const real* br = b + int64_t(n) * ldb;
+          real s = 0;
+          for (int k = 0; k < K; ++k) s += ar[k] * br[k];
+          c[n] = alpha * s + (beta == real(0) ? real(0) : beta * c[n]);
+        }
+      }
+      return;
+    }
     for (int n = 0; n < N; ++n) {
       real s = 0;
       for (int k = 0; k < K; ++k)
