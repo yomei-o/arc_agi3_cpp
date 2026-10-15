@@ -42,7 +42,7 @@ for a in sys.argv[1:]:
         MODE = a.split("=", 1)[1] if "=" in a else sys.argv[sys.argv.index(a) + 1]
 if "--denovo" in sys.argv:
     MODE = "denovo"
-assert MODE in ("sibling", "denovo"), MODE
+assert MODE in ("sibling", "denovo", "xinstr"), MODE
 
 ROOT = Path(args[0] if args else r"C:\prog\casmi")
 PREFIX = "lib" if MODE == "sibling" else "dlib"
@@ -70,6 +70,9 @@ def _opt(name: str) -> str | None:
 # --any-instr drops the timsTOF/mass eligibility filter (there may be too few
 # timsTOF natural products), and --prefix LIB,QRY names the outputs.
 KEYS_FILE = _opt("--keys")
+# xinstr: --qinstr NAME is the query instrument (default timsTOF, the hidden
+# test's); the library keeps only the held molecules' spectra on OTHER instruments
+QINSTR = _opt("--qinstr") or "timsTOF"
 # --n N and --seed S: holdout size and draw (defaults 400 / 12345, which
 # reproduce every holdout built before these options existed).
 if _opt("--n"):
@@ -79,7 +82,7 @@ if _opt("--seed"):
 ANY_INSTR = "--any-instr" in sys.argv
 if _opt("--prefix"):
     PREFIX, QPREFIX = _opt("--prefix").split(",")
-args = [a for a in args if a not in (KEYS_FILE, _opt("--prefix"), _opt("--n"), _opt("--seed"))]
+args = [a for a in args if a not in (KEYS_FILE, _opt("--prefix"), _opt("--n"), _opt("--seed"), _opt("--qinstr"))]
 
 # Precursor jitter, in ppm, added to the query spectra only.
 #
@@ -140,16 +143,23 @@ def main() -> None:
 
     # First pass: which molecules could stand in for a test molecule?
     seen: dict[str, int] = {}
+    other: dict[str, int] = {}  # xinstr: spectra of the molecule on non-timsTOF instruments
     for b in f.iter_batches(batch_size=300000,
                             columns=["inchikey14", "precursor_mz", "instrument_type"]):
         d = b.to_pandas()
         ok = d.inchikey14.notna()
         if not ANY_INSTR:
-            ok = ok & (d.instrument_type == "timsTOF") & d.precursor_mz.between(MZ_LO, MZ_HI)
+            ok = ok & (d.instrument_type == QINSTR) & d.precursor_mz.between(MZ_LO, MZ_HI)
         for k in d.inchikey14[ok]:
             seen[k] = seen.get(k, 0) + 1
+        if MODE == "xinstr":
+            for k in d.inchikey14[d.inchikey14.notna() & (d.instrument_type != QINSTR)]:
+                other[k] = other.get(k, 0) + 1
     # The real test averages three spectra per molecule; ask for at least two.
     pool = [k for k, n in seen.items() if n >= 2]
+    if MODE == "xinstr":
+        # needs its own spectra on another instrument to stay in the library
+        pool = [k for k, n in seen.items() if n >= 1 and other.get(k, 0) >= 1]
     if KEYS_FILE:
         allow = set(Path(KEYS_FILE).read_text().split())
         pool = sorted(k for k in pool if k in allow)
@@ -204,10 +214,11 @@ def main() -> None:
             pmz = float(r.precursor_mz) if r.precursor_mz == r.precursor_mz else 0.0
             smi = r.normalized_smiles if isinstance(r.normalized_smiles, str) else ""
 
-            eligible = ANY_INSTR or (r.instrument_type == "timsTOF" and MZ_LO <= pmz <= MZ_HI)
+            eligible = ANY_INSTR or (r.instrument_type == QINSTR and MZ_LO <= pmz <= MZ_HI)
             if key in held:
                 if key not in max_q_for:
-                    cap = MAX_Q if MODE == "denovo" else min(MAX_Q, seen.get(key, 1) - 1)
+                    cap = (MAX_Q if MODE in ("denovo", "xinstr")
+                           else min(MAX_Q, seen.get(key, 1) - 1))
                     max_q_for[key] = max(0, cap)
                 # A query spectrum has to look like a test spectrum.
                 if eligible and qcount.get(key, 0) < max_q_for[key]:
@@ -228,6 +239,11 @@ def main() -> None:
                 # In denovo the molecule is gone from the library entirely, so
                 # its leftover spectra are dropped rather than filed away.
                 if MODE == "denovo":
+                    continue
+                # xinstr: the hidden test is timsTOF while the library holds the
+                # same molecules measured elsewhere - keep only the molecule's
+                # non-timsTOF spectra in the library
+                if MODE == "xinstr" and r.instrument_type == QINSTR:
                     continue
             if key not in lib_mols:
                 lib_mols[key] = len(lib_names)
