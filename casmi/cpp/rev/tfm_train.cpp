@@ -375,6 +375,26 @@ double evaluateSets(std::vector<tfm::Model*>& ms, const Fps& F, std::vector<Eval
     if (verbose)
       std::printf("  [%s] dump rev column: alone %.4f fused(wr=1) %.4f | wr=0 %.4f\n", e.name.c_str(), fused(-1, -1.f),
                   fused(-1, 1.f), fused(-1, 0.f));
+    if (verbose) {  // diagnostic: fusion without the library / analog terms (z(phys) + 0.25 z(mlp) + wr z(rev))
+      auto noAna = [&](int v, float wr) {
+        double tot = 0;
+        for (size_t qi = 0; qi < e.qs.size(); ++qi) {
+          const DQ& q = e.qs[qi];
+          size_t n = q.c.size();
+          std::vector<float> ph(n), ml(n), rv(n);
+          for (size_t i = 0; i < n; ++i) { ph[i] = q.c[i].phys; ml[i] = q.c[i].mlp; rv[i] = v < 0 ? q.c[i].rev : rs[v][qi][i]; }
+          auto zp = zscore(ph), zm = zscore(ml), zr = zscore(rv);
+          std::vector<float> f(n);
+          for (size_t i = 0; i < n; ++i) f[i] = zp[i] + 0.25f * zm[i] + wr * zr[i];
+          tot += rr(f, q.truth);
+        }
+        return tot / std::max<size_t>(1, e.qs.size());
+      };
+      std::printf("  [%s] no lib/ana: phys+mlp only %.4f | dump rev wr1 %.4f | this model logit wr:", e.name.c_str(), noAna(-1, 0.f),
+                  noAna(-1, 1.f));
+      for (float wr : WR) std::printf(" %g=%.4f", wr, noAna(0, wr));
+      std::printf("\n");
+    }
     for (int v = 0; v < NV; ++v) {
       if (!verbose && v > 0) break;
       double alone = 0;
@@ -453,7 +473,8 @@ void evalCombo(std::vector<tfm::Model*>& ms, rev2::Model& mlp, const Fps& F, std
         zt[qi] = zscore(a); zm[qi] = zscore(b);
       }
       for (float al : AS) {
-        std::printf("  [%s] combo %s + %g*z(mlp):", e.name.c_str(), VNAME[v], al);
+        for (int noAna = 0; noAna < 2; ++noAna) {
+        std::printf("  [%s] combo%s %s + %g*z(mlp):", e.name.c_str(), noAna ? " NO-LIB/ANA" : "", VNAME[v], al);
         for (float wr : WR) {
           double tot = 0;
           for (size_t qi = 0; qi < e.qs.size(); ++qi) {
@@ -467,12 +488,13 @@ void evalCombo(std::vector<tfm::Model*>& ms, rev2::Model& mlp, const Fps& F, std
             auto zp = zscore(ph), zmm = zscore(ml), zr = zscore(rv);
             std::vector<float> f(n);
             for (size_t i = 0; i < n; ++i)
-              f[i] = zp[i] + 0.25f * zmm[i] + wr * zr[i] + 8.f * std::pow(q.c[i].lib, 32.f) + 24.f * q.c[i].ana;
+              f[i] = zp[i] + 0.25f * zmm[i] + wr * zr[i] + (noAna ? 0.f : 8.f * std::pow(q.c[i].lib, 32.f) + 24.f * q.c[i].ana);
             tot += rr(f, q.truth);
           }
           std::printf(" wr%g=%.4f", wr, tot / std::max<size_t>(1, e.qs.size()));
         }
         std::printf("\n");
+        }
       }
     }
   }
