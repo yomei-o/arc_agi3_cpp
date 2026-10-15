@@ -19,6 +19,8 @@
 #include <cstdlib>
 #include <vector>
 
+static int SUB = 1;  // sub-points per cell edge for the cell-averaged potential (1 = plain)
+
 double solve(double L, double h, double R, int* steps_out) {
   const int n = 2 * int(std::lround(L / h / 2));
   const size_t N = size_t(n) * n * n;
@@ -32,7 +34,22 @@ double solve(double L, double h, double R, int* steps_out) {
         double x = i * h - c, y = j * h - c, z = k * h - c;
         double ra = std::sqrt((x + R / 2) * (x + R / 2) + y * y + z * z);
         double rb = std::sqrt((x - R / 2) * (x - R / 2) + y * y + z * z);
-        V[id(i, j, k)] = -1.0 / ra - 1.0 / rb;
+        if (SUB <= 1) {
+          V[id(i, j, k)] = -1.0 / ra - 1.0 / rb;
+        } else {
+          // egg-box fix: the potential of a grid point = the mean of -1/r over its cell
+          // (SUB^3 sub-points), so it changes smoothly as a nucleus moves through the grid
+          double v = 0;
+          for (int a = 0; a < SUB; ++a)
+            for (int b = 0; b < SUB; ++b)
+              for (int d = 0; d < SUB; ++d) {
+                double xs = x + h * ((a + 0.5) / SUB - 0.5), ys = y + h * ((b + 0.5) / SUB - 0.5),
+                       zs = z + h * ((d + 0.5) / SUB - 0.5);
+                v -= 1.0 / std::sqrt((xs + R / 2) * (xs + R / 2) + ys * ys + zs * zs) +
+                     1.0 / std::sqrt((xs - R / 2) * (xs - R / 2) + ys * ys + zs * zs);
+              }
+          V[id(i, j, k)] = v / (SUB * SUB * SUB);
+        }
         psi[id(i, j, k)] = std::exp(-ra) + std::exp(-rb);  // LCAO-like start
       }
   const double tau = 0.9 * h * h / 3.0, inv_h2 = 1.0 / (h * h);
@@ -80,10 +97,11 @@ double solve(double L, double h, double R, int* steps_out) {
 int main(int argc, char** argv) {
   double h = argc > 1 ? std::atof(argv[1]) : 0.2;
   double L = argc > 2 ? std::atof(argv[2]) : 20.0;
+  if (const char* e = std::getenv("SUB")) SUB = std::atoi(e);
   std::vector<double> Rs;
   for (int a = 3; a < argc; ++a) Rs.push_back(std::atof(argv[a]));
   if (Rs.empty()) Rs = {1.0, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 4.0, 6.0};
-  std::printf("H2+  h %.3f bohr, box %.1f bohr; exact R_e 1.997, E(R_e) -0.60263, D_e 0.10263 Hartree\n", h, L);
+  std::printf("H2+  h %.3f bohr, box %.1f bohr, cell-average sub %d; exact R_e 1.997, E(R_e) -0.60263, D_e 0.10263 Hartree\n", h, L, SUB);
   std::printf("%6s %12s %14s %8s\n", "R", "E(R)", "E - E(H+H+)", "steps");
   double bestR = 0, bestE = 1e9;
   for (double R : Rs) {
