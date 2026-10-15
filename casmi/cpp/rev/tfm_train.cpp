@@ -6,7 +6,7 @@
 //     d=256 L=4 H=8 ff=4 demb=<d> HH=2048 maxPeaks=128 epochs=6 B=256 lr=3e-4 wd=0.05 drop=0.1 clip=1
 //     warm=2000 ls=0 seed=31 hold=20 tf32=1 ckptEvery=2000 stopAfter=0(min) resume=0 valMax=20000
 //     eval=cqry:f21_cqry.txt,tqry:f21_tqry.txt cand=fcand
-//   tfm_train eval models=a.bin[,b.bin] fp=v4k [lib=xlib hold=20 for held-out BCE/F1]
+//   tfm_train eval models=a.bin[,b.bin] fp=v4k [mlp=rev2_vh.bin: z-sum combination grid] [lib=xlib hold=20 for held-out BCE/F1]
 //
 // hold=K leaves out every molecule whose InChIKey14 hashes to 0 mod K (same split as rev2_train).
 // The fused evaluation is rev2_train's: only the reverse-model column of the phys_ana feature dumps
@@ -30,6 +30,7 @@
 
 #include "parallel.hpp"
 #include "tfm_model.hpp"
+#include "rev2_model.hpp"
 
 using tfm::real;
 
@@ -391,6 +392,93 @@ double evaluateSets(std::vector<tfm::Model*>& ms, const Fps& F, std::vector<Eval
   return ret;
 }
 
+// rev2 MLP: molecule -> mean probability over its spectra (as rev2_train predictByMol)
+std::unordered_map<int, std::vector<float>> mlpByMol(rev2::Model& m, const Store& q, const std::vector<int>& spec) {
+  std::unordered_map<int, std::vector<float>> sum;
+  std::unordered_map<int, int> cnt;
+  const int B = 256;
+  std::vector<std::vector<std::pair<int, float>>> rows;
+  std::vector<float> P;
+  for (size_t s0 = 0; s0 < spec.size(); s0 += B) {
+    size_t s1 = std::min(spec.size(), s0 + B);
+    rows.assign(s1 - s0, {});
+    for (size_t i = s0; i < s1; ++i) {
+      const Head& h = q.head[spec[i]];
+      rev2::featurize(m.fc, reinterpret_cast<const rev2::Head&>(h), q.mzs(h), q.its(h), rows[i - s0]);
+    }
+    m.setBatch(rows, false);
+    m.forward(int(s1 - s0), false, 0.f, 0);
+    rev2::download(m.P, P, int64_t(s1 - s0) * m.NB);
+    for (size_t s = s0; s < s1; ++s) {
+      int mol = q.head[spec[s]].mol;
+      auto& v = sum[mol];
+      if (v.empty()) v.assign(m.NB, 0.f);
+      for (int i = 0; i < m.NB; ++i) v[i] += P[(s - s0) * m.NB + i];
+      ++cnt[mol];
+    }
+  }
+  for (auto& kv : sum) for (auto& x : kv.second) x /= float(cnt[kv.first]);
+  return sum;
+}
+
+// rev column = z(TFM score variant v) + a * z(MLP logit score); fused MRR for a grid of (a, wr)
+void evalCombo(std::vector<tfm::Model*>& ms, rev2::Model& mlp, const Fps& F, std::vector<EvalSet>& sets) {
+  const float AS[] = {0.f, 0.25f, 0.5f, 0.75f, 1.f, 1.5f, 100.f};
+  const float WR[] = {1.f, 1.5f, 2.f, 2.5f, 3.f};
+  for (auto& e : sets) {
+    std::vector<int> spec;
+    std::vector<char> want(e.q.name.size(), 0);
+    for (auto& q : e.qs) if (q.mol >= 0) want[q.mol] = 1;
+    for (size_t s = 0; s < e.q.head.size(); ++s)
+      if (e.q.head[s].mol >= 0 && want[e.q.head[s].mol] && e.q.head[s].n > 0) spec.push_back(int(s));
+    auto pt = predictByMol(ms, e.q, spec);
+    auto pm = mlpByMol(mlp, e.q, spec);
+    for (int v : {0, 3}) {
+      std::vector<std::vector<float>> zt(e.qs.size()), zm(e.qs.size());
+      for (size_t qi = 0; qi < e.qs.size(); ++qi) {
+        const DQ& q = e.qs[qi];
+        std::vector<float> a(q.c.size(), 0.f), b(q.c.size(), 0.f);
+        auto it = pt.find(q.mol); auto im = pm.find(q.mol);
+        if (it != pt.end() && im != pm.end()) {
+          Scorer sc; sc.prep(it->second);
+          MolPred mp; mp.p = im->second; mp.z.assign(mp.p.size(), 0.f);
+          Scorer sm; sm.prep(mp);
+          for (size_t ci = 0; ci < q.c.size(); ++ci) {
+            int k = q.c[ci].key;
+            if (k < 0) continue;
+            const uint16_t* bits = F.bits.data() + F.ptr[k]; int n = int(F.ptr[k + 1] - F.ptr[k]);
+            a[ci] = sc.score(v, bits, n); b[ci] = sm.score(0, bits, n);
+          }
+        }
+        zt[qi] = zscore(a); zm[qi] = zscore(b);
+      }
+      for (float al : AS) {
+        std::printf("  [%s] combo %s + %g*z(mlp):", e.name.c_str(), VNAME[v], al);
+        for (float wr : WR) {
+          double tot = 0;
+          for (size_t qi = 0; qi < e.qs.size(); ++qi) {
+            const DQ& q = e.qs[qi];
+            size_t n = q.c.size();
+            std::vector<float> ph(n), ml(n), rv(n);
+            for (size_t i = 0; i < n; ++i) {
+              ph[i] = q.c[i].phys; ml[i] = q.c[i].mlp;
+              rv[i] = al >= 100.f ? zm[qi][i] : zt[qi][i] + al * zm[qi][i];
+            }
+            auto zp = zscore(ph), zmm = zscore(ml), zr = zscore(rv);
+            std::vector<float> f(n);
+            for (size_t i = 0; i < n; ++i)
+              f[i] = zp[i] + 0.25f * zmm[i] + wr * zr[i] + 8.f * std::pow(q.c[i].lib, 32.f) + 24.f * q.c[i].ana;
+            tot += rr(f, q.truth);
+          }
+          std::printf(" wr%g=%.4f", wr, tot / std::max<size_t>(1, e.qs.size()));
+        }
+        std::printf("\n");
+      }
+    }
+  }
+  std::fflush(stdout);
+}
+
 // held-out spectra: mean BCE per spectrum (sum over bits), micro F1 at p>=0.5, and per-bit-macro AUC-free stats
 void validate(tfm::Model& m, const Store& st, const Fps& fps, const std::vector<int>& val) {
   if (val.empty()) return;
@@ -562,6 +650,13 @@ int main(int argc, char** argv) {
     }
     auto sets = loadEval(dir, evalSpec, cf);
     evaluateSets(ms, cf.fps, sets, true);
+    std::string mlpPath = get(A, "mlp", "");
+    if (!mlpPath.empty()) {
+      rev2::Model mm;
+      if (!mm.load(dir + "/" + mlpPath)) { std::fprintf(stderr, "cannot load %s\n", mlpPath.c_str()); return 1; }
+      std::printf("combo with MLP %s (%d bits; 'a=100' = MLP alone)\n", mlpPath.c_str(), mm.NB);
+      evalCombo(ms, mm, cf.fps, sets);
+    }
     int hold = geti(A, "hold", 0);
     if (hold > 0 && ms.size() == 1) {
       Store ls = loadSpectra(dir, get(A, "lib", "xlib"));
