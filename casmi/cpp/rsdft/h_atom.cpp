@@ -29,7 +29,9 @@
 struct Result { double h, E, r_mean; int steps; };
 
 Result solve(double L, double h) {
-  const int n = int(std::lround(L / h));
+  // n must be even: then the box centre (the nucleus) is the centre of a cell.
+  // With odd n it is a grid point, r = 0 there, -1/r = inf and the run is NaN.
+  const int n = 2 * int(std::lround(L / h / 2));
   const size_t N = size_t(n) * n * n;
   auto id = [n](int i, int j, int k) { return (size_t(i) * n + j) * n + k; };
   const double c = 0.5 * (n - 1) * h;  // box centre = centre of a cell when n is even
@@ -102,7 +104,7 @@ int main(int argc, char** argv) {
   std::vector<Result> res;
   for (double h : hs) {
     Result r = solve(L, h);
-    int n = int(std::lround(L / h));
+    int n = 2 * int(std::lround(L / h / 2));
     std::printf("%6.3f %8d %12.6f %10.6f %8.4f %8d\n", h, n * n * n, r.E, r.E + 0.5, r.r_mean, r.steps);
     std::fflush(stdout);
     if (!res.empty()) {
