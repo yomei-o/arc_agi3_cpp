@@ -752,6 +752,46 @@ int main(int argc, char** argv) {
               clip, int(tfm::tf32Flag()));
   m.reserve(B, m.c.maxPeaks + 1);
 
+  // ---- optional contrastive ranking loss (FPNet-style): softmax over {true molecule, up to K training
+  // molecules within +-ppm of its neutral mass}, score = sum of logits over the candidate's on-bits / tau.
+  const float rankW = getf(A, "rank", 0.f), tau = getf(A, "tau", 4.f), ppm = getf(A, "ppm", 15.f);
+  const int K = geti(A, "K", 32);
+  std::vector<std::pair<double, int>> massList;
+  std::vector<double> molMass(st.name.size(), -1.0);
+  if (rankW > 0.f) {
+    std::vector<std::vector<double>> mm(st.name.size());
+    for (int s : idx) {
+      const Head& h = st.head[s];
+      int a, in_; float mo;
+      decodeTag(h.tag, a, in_, mo);
+      if (a >= 10) continue;
+      double M = double(h.precursor) - double(rev2::ADDUCT_SHIFT[a]);
+      if (a >= 8) M /= 2.0;
+      mm[h.mol].push_back(M);
+    }
+    for (size_t i = 0; i < mm.size(); ++i) {
+      if (mm[i].empty()) continue;
+      std::sort(mm[i].begin(), mm[i].end());
+      molMass[i] = mm[i][mm[i].size() / 2];
+      massList.emplace_back(molMass[i], int(i));
+    }
+    std::sort(massList.begin(), massList.end());
+    size_t withNeg = 0, totNeg = 0;
+    for (size_t i = 0; i < massList.size(); ++i) {
+      double M = massList[i].first, w = M * ppm * 1e-6;
+      auto lo = std::lower_bound(massList.begin(), massList.end(), std::make_pair(M - w, -1));
+      auto hi = std::upper_bound(massList.begin(), massList.end(), std::make_pair(M + w, 1 << 30));
+      size_t n = size_t(hi - lo) - 1;
+      withNeg += n > 0; totNeg += std::min<size_t>(n, size_t(K));
+    }
+    std::printf("rank loss: weight %g tau %g K %d ppm %g; %zu training molecules with mass, %.1f%% have >=1 negative, mean %.1f negatives (capped)\n",
+                rankW, tau, K, ppm, massList.size(), 100.0 * withNeg / std::max<size_t>(1, massList.size()),
+                double(totNeg) / std::max<size_t>(1, massList.size()));
+  }
+  bk::Buffer<int32_t> dcptr, dcbits;
+  tfm::Buf dS, dWr;
+  if (rankW > 0.f) { dcptr.alloc(int64_t(B) * (K + 1) + 1); dS.alloc(int64_t(B) * (K + 1)); dWr.alloc(int64_t(B) * (K + 1)); }
+
   // deterministic per-epoch batches: shuffle, sort chunks of 64 batches by token count, shuffle batches
   auto makeBatches = [&](int ep) {
     std::vector<int> o = idx;
@@ -773,9 +813,39 @@ int main(int argc, char** argv) {
   std::printf("steps/epoch %lld, total %lld\n", (long long)stepsPerEpoch, (long long)totalSteps);
   std::fflush(stdout);
 
-  struct Prep { tfm::HostBatch hb; std::vector<real> T; };
+  struct Prep { tfm::HostBatch hb; std::vector<real> T; std::vector<int32_t> cptr, cbits, nc; uint64_t key = 0; };
   auto prep = [&](const std::vector<int>& specs, Prep& p) {
     buildBatch(st, specs, m.c.maxPeaks, p.hb);
+    if (rankW > 0.f) {
+      p.cptr.assign(size_t(B) * (K + 1) + 1, 0); p.cbits.clear(); p.nc.assign(B, 0);
+      uint64_t r = 0x51ED27ull + p.key * 0x9E3779B97F4A7C15ull;
+      auto nx = [&]() { r ^= r << 13; r ^= r >> 7; r ^= r << 17; return r; };
+      std::vector<int> cand, neg;
+      for (int b = 0; b < B; ++b) {
+        int mol = st.head[specs[b]].mol;
+        cand.assign(1, mol);
+        double M = molMass[mol];
+        if (M > 0) {
+          double w = M * ppm * 1e-6;
+          auto lo = std::lower_bound(massList.begin(), massList.end(), std::make_pair(M - w, -1));
+          auto hi = std::upper_bound(massList.begin(), massList.end(), std::make_pair(M + w, 1 << 30));
+          neg.clear();
+          for (auto it = lo; it != hi; ++it) if (it->second != mol) neg.push_back(it->second);
+          for (int k = 0; k < K && !neg.empty(); ++k) {
+            size_t j = nx() % neg.size();
+            cand.push_back(neg[j]);
+            neg[j] = neg.back(); neg.pop_back();
+          }
+        }
+        p.nc[b] = int(cand.size());
+        for (int c = 0; c <= K; ++c) {
+          size_t slot = size_t(b) * (K + 1) + c;
+          if (c < int(cand.size()))
+            for (uint32_t k = fps.ptr[cand[c]]; k < fps.ptr[cand[c] + 1]; ++k) p.cbits.push_back(fps.bits[k]);
+          p.cptr[slot + 1] = int32_t(p.cbits.size());
+        }
+      }
+    }
     p.T.assign(size_t(B) * m.c.NB, real(0));
     for (int b = 0; b < B; ++b) {
       int mol = st.head[specs[b]].mol;
@@ -787,20 +857,60 @@ int main(int argc, char** argv) {
   auto secs = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
   int64_t step = step0;
   double lossAcc = 0; int lossN = 0; double tokAcc = 0, tLast = 0;
+  double rankLoss = 0, rankAcc = 0, rankN = 0;
   std::vector<real> zh;
   bool stopped = false;
   for (int ep = int(step0 / stepsPerEpoch); ep < epochs && !stopped; ++ep) {
     auto bs = makeBatches(ep);
     int64_t st0 = step - int64_t(ep) * stepsPerEpoch;
     Prep cur, nxt;
+    cur.key = uint64_t(step);
     prep(bs[st0], cur);
     for (int64_t si = st0; si < stepsPerEpoch; ++si, ++step) {
       std::thread th;
-      if (si + 1 < stepsPerEpoch) th = std::thread([&, si]() { prep(bs[si + 1], nxt); });
+      if (si + 1 < stepsPerEpoch) th = std::thread([&, si]() { nxt.key = uint64_t(step) + 1; prep(bs[si + 1], nxt); });
       m.setBatch(cur.hb);
       tfm::upload(m.T, cur.T.data(), int64_t(cur.T.size()));
       m.forward(true, drop, uint64_t(step) + 1);
       m.lossGrad(ls);
+      if (rankW > 0.f) {
+        const int KK = K + 1, NB = m.c.NB;
+        if (dcbits.size() < int64_t(cur.cbits.size()) || !dcbits.data()) dcbits.alloc(std::max<int64_t>(1, int64_t(cur.cbits.size()) * 2));
+        tfm::upload(dcptr, cur.cptr.data(), int64_t(cur.cptr.size()));
+        tfm::upload(dcbits, cur.cbits.data(), int64_t(cur.cbits.size()));
+        const int32_t* CP = dcptr.data(); const int32_t* CB = dcbits.data(); const real* Zp = m.Z.data(); real* Sp = dS.data();
+        tfm::pfor(int64_t(B) * KK, [=] BK_HD (int64_t i) {
+          int64_t b = i / KK; real sc = 0;
+          for (int k = CP[i]; k < CP[i + 1]; ++k) sc += Zp[b * NB + CB[k]];
+          Sp[i] = sc;
+        });
+        std::vector<real> S(size_t(B) * KK), Wr(size_t(B) * KK, real(0));
+        tfm::download(dS, S.data(), int64_t(S.size()));
+        std::vector<double> e(KK);
+        for (int b = 0; b < B; ++b) {
+          int n = cur.nc[b];
+          if (n < 2) continue;
+          const real* sb = S.data() + size_t(b) * KK;
+          double mx = -1e300;
+          for (int c = 0; c < n; ++c) mx = std::max(mx, double(sb[c]) / tau);
+          double sum = 0;
+          for (int c = 0; c < n; ++c) { e[c] = std::exp(double(sb[c]) / tau - mx); sum += e[c]; }
+          int best = 0;
+          for (int c = 1; c < n; ++c) if (sb[c] > sb[best]) best = c;
+          rankLoss += -std::log(std::max(1e-300, e[0] / sum)); rankAcc += best == 0; rankN += 1;
+          for (int c = 0; c < n; ++c) Wr[size_t(b) * KK + c] = real(rankW * (e[c] / sum - (c == 0 ? 1.0 : 0.0)) / (tau * B));
+        }
+        tfm::upload(dWr, Wr.data(), int64_t(Wr.size()));
+        const real* Wp = dWr.data(); real* dZp = m.dZ.data();
+        tfm::pfor(B, [=] BK_HD (int64_t b) {
+          for (int c = 0; c < KK; ++c) {
+            real wc = Wp[b * KK + c];
+            if (wc == real(0)) continue;
+            int64_t i = b * KK + c;
+            for (int k = CP[i]; k < CP[i + 1]; ++k) dZp[b * NB + CB[k]] += wc;
+          }
+        });
+      }
       m.backward(drop, uint64_t(step) + 1);
       double gn = std::sqrt(m.gradNorm2());
       float gs = (clip > 0 && gn > clip) ? float(clip / gn) : 1.f;
@@ -821,9 +931,10 @@ int main(int argc, char** argv) {
       }
       if (si % logEvery == 0) {
         double now = secs();
-        std::printf("ep %d step %lld/%lld (global %lld)  train BCE/spectrum %.3f  |g| %.3f  lr %.2e  %.0f tok/s  %.0fs\n", ep,
-                    (long long)si, (long long)stepsPerEpoch, (long long)step, lossAcc / std::max(1, lossN), gn, lrNow,
-                    tokAcc / std::max(1e-9, now - tLast), now);
+        std::printf("ep %d step %lld/%lld (global %lld)  train BCE/spectrum %.3f  rank CE %.3f top1 %.3f  |g| %.3f  lr %.2e  %.0f tok/s  %.0fs\n",
+                    ep, (long long)si, (long long)stepsPerEpoch, (long long)step, lossAcc / std::max(1, lossN),
+                    rankLoss / std::max(1.0, rankN), rankAcc / std::max(1.0, rankN), gn, lrNow, tokAcc / std::max(1e-9, now - tLast), now);
+        rankLoss = rankAcc = rankN = 0;
         std::fflush(stdout);
         lossAcc = 0; lossN = 0; tokAcc = 0; tLast = now;
       }
