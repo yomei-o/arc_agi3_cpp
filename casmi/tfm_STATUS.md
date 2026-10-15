@@ -44,7 +44,7 @@ bqkv の key 部分は真の勾配が 0（softmax の平行移動不変性）な
 | A | d256 L4, drop 0.1, lr 3e-4, 12 ep | BCE | 37.7 分 | tfm_A.bin（+ tfm_A_ep1..12.bin） |
 | B | d512 L6, drop 0.2, lr 2e-4, 6 ep | BCE | 113 分（C と GPU 共有） | tfm_B.bin（+ ep1..6） |
 | C | d256 L4, drop 0.1, lr 3e-4, 8 ep | BCE + 4·ランキング（τ=4, K=32, ±15ppm） | 88 分（B と共有） | tfm_C.bin（+ ep1..8） |
-ログ: ビルド機 C:\prog\casmiwdmodel	fm\{A,B,C}.log。`*_ck.bin` は Adam 状態つき再開用。
+ログ: ビルド機 C:\prog\casmiwdmodel	fm{A,B,C}.log。`*_ck.bin` は Adam 状態つき再開用。
 
 ## 結果（融合 MRR@25、cqry 400 / tqry 176。ノイズ目安 ±0.01）
 フル融合 = z(phys)+0.25 z(mlp)+wr z(rev)+8 lib^32+24 anaP（phys_ana / rev2_train と同一）。
