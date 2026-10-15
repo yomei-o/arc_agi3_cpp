@@ -1,0 +1,50 @@
+# 量子化学の障壁計算を家で続ける手順
+
+GPU は不要（xTB も、次の段の DFT/PySCF も CPU で動く）。
+
+## 1. 入れるもの
+- **xTB 6.7.1**: https://github.com/grimme-lab/xtb/releases から自分の OS 用を取って展開。
+  Windows は `xtb-6.7.1-windows-x86_64.zip`、Linux/WSL は `xtb-6.7.1-linux-x86_64.tar.xz`。
+- **Python 3.10 以上** と `pip install rdkit numpy`
+- リポジトリを `git pull`（このフォルダ `casmi/py/qm/` を使う）
+
+## 2. 場所の指定（環境変数）
+```
+# Windows (cmd)
+set XTB_EXE=C:\path\to\xtb-6.7.1\bin\xtb.exe
+set TS_GEO_DIR=C:\path\to\ts_geo
+# Linux / WSL
+export XTB_EXE=$HOME/xtb-dist/bin/xtb
+export TS_GEO_DIR=$HOME/ts_geo
+```
+`TS_GEO_DIR` には各スキャンの「山の頂上」の構造（*_top.xyz）が保存される（次の段の DFT 一点計算に使う）。
+
+## 3. 動かす
+```
+cd casmi/py/qm
+# 試運転（3分子、6並列、結合の種類ごとに1本）
+python ts_scan.py data_ts/fqry_mols.txt 3 ts_smoke.csv 6 1
+# 本番（150分子、8並列、種類ごとに3本まで）
+python ts_scan.py data_ts/fqry_mols.txt 150 ts_scan150.csv 8 3
+# 分析（種類ごとの障壁と、観測された断片との対応）
+python ts_analyze.py ts_scan150.csv data_ts/huckel_fqry2.json
+```
+引数: `ts_scan.py <分子リスト> <分子数> <出力CSV> [並列数] [種類ごとの本数]`。
+速さの目安: スキャン1本 = 1コアで数十秒〜数分（ビルド機12並列で 85本 数分）。
+CSV は1本ごとに書き足すので、途中で止めても書けた分は残る。
+
+## 4. データ（data_ts/）
+- `fqry_mols.txt` — 合わせ込み用の天然物 1000 分子（InChIKey14 <TAB> SMILES）
+- `huckel_fqry2.json` — その [M+H]+ スペクトルでの観測ラベル（切断ごとに両側の偶数電子陽イオンが 0.01 Da 以内に出ているか、+0.3 Da の偶然一致対照付き）。huckel_export2.py で作成
+- `ts_scan40.csv` — 2026-10-15 の最初の結果（40分子・85本）
+
+## 5. ここまでの結果（2026-10-15）
+- 障壁の低い順 **アシル 28 < C–ヘテロ 50 < C–C 85 < アリール–C 108 kcal/mol** = 物理モデルを実測に合わせて得た序列と同じ（昨日の BDE では出なかった）。
+- アリール–C/C–C の 85〜108 kcal/mol は CID の内部エネルギー（1〜3 eV = 23〜70 kcal/mol）では越えられない → 実際の断片は **水素移動・転位を伴う低い経路**で出ている。スキャンの約半分は頂上が見えない（plateau）。
+- 同じ種類の中で「障壁が低いほど観測される」かは、ラベル付き 39 本では判定不能（AUC 0.42〜0.60）。
+
+## 6. 次にやること
+1. 150分子の結果で、同じ種類の中での判定（AUC）を出す。
+2. 水素移動を伴う経路: アリール–C は ipso 炭素へのプロトン移動（アレニウムイオン）→ 切断、C–C は H 移動 → 中性分子の脱離。xTB の `--path`（反応物と生成物を与えて最小エネルギー経路）で障壁を出す。
+3. 山の頂上の構造で DFT 一点計算（PySCF, ωB97X-D/def2-SVP 程度）をして xTB との差を見る。
+4. 障壁を「結合の種類 + 環境（隣接原子、共役、電荷の位置）」の式にまとめ、C++ の物理モデル（phys_size 系）に入れて、作り直した holdout で測る。

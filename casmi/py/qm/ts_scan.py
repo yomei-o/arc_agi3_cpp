@@ -29,10 +29,11 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 
 RDLogger.DisableLog("rdApp.*")
-XTB = r"C:\prog\xtb\xtb-6.7.1\bin\xtb.exe"
+# Paths: environment variables override the build-machine defaults (see HOME_QM.md).
+XTB = os.environ.get("XTB_EXE", r"C:\prog\xtb\xtb-6.7.1\bin\xtb.exe")
 HARTREE = 627.509
 STRETCH, NSTEP = 2.0, 16
-OUTDIR = r"C:\prog\casmi\ts_scan_geo"
+OUTDIR = os.environ.get("TS_GEO_DIR", r"C:\prog\casmi\ts_scan_geo")
 
 
 def has_double_o(c):
