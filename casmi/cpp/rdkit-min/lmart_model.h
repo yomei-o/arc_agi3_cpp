@@ -4,6 +4,7 @@
 //   LMART1
 //   features <F> <name_0> ... <name_F-1>     (names the trainer saw; mapped to
 //                                           lm_feat.h's order at load time)
+//   [opt <key> <value>]...                 (optional, e.g. gate / blend / libfloor)
 //   base <feature name or -> <coef>          (score = coef * x[base] + trees)
 //   trees <T>
 //   then per tree: "tree <nNodes>" and nNodes lines
@@ -12,6 +13,7 @@
 #pragma once
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,7 @@ struct Model {
   int baseFeat = -1;
   float baseCoef = 0.f;
   std::vector<Tree> trees;
+  std::map<std::string, double> opts;  // "opt" lines
 
   // names: the caller's feature order (lmf::names()). Returns false on a
   // missing feature or a malformed file.
@@ -49,7 +52,15 @@ struct Model {
       if (fmap[k] < 0) { std::fprintf(stderr, "lmart: feature %s unknown\n", mn[k].c_str()); return false; }
     }
     std::string bname;
-    f >> tag >> bname >> baseCoef;
+    f >> tag;
+    while (tag == "opt") {  // optional "opt <key> <value>" lines (lmart_v29: gate, blend, libfloor)
+      std::string k;
+      double v = 0;
+      f >> k >> v;
+      opts[k] = v;
+      f >> tag;
+    }
+    f >> bname >> baseCoef;
     if (tag != "base") return false;
     baseFeat = -1;
     if (bname != "-") {
