@@ -80,9 +80,20 @@ if _opt("--n"):
 if _opt("--seed"):
     RNG = np.random.default_rng(int(_opt("--seed")))
 ANY_INSTR = "--any-instr" in sys.argv
+# holdout2 options (2026-10-19; defaults reproduce every older holdout):
+# --min-spec N   eligible molecules need >= N eligible spectra (default 2; the
+#                ">= 2" rule picked famous, often-measured molecules)
+# --exclude F,.. molecules named in these *_mols.txt files are not eligible
+#                (keeps a new holdout disjoint from older ones and from fit sets)
+# --no-lib       write only the query files (the library is built separately,
+#                e.g. by build_ylib.py, shared by several holdouts)
+MIN_SPEC = int(_opt("--min-spec") or 2)
+EXCLUDE = _opt("--exclude")
+NO_LIB = "--no-lib" in sys.argv
 if _opt("--prefix"):
     PREFIX, QPREFIX = _opt("--prefix").split(",")
-args = [a for a in args if a not in (KEYS_FILE, _opt("--prefix"), _opt("--n"), _opt("--seed"), _opt("--qinstr"))]
+args = [a for a in args if a not in (KEYS_FILE, _opt("--prefix"), _opt("--n"), _opt("--seed"), _opt("--qinstr"),
+                                     _opt("--min-spec"), EXCLUDE)]
 
 # Precursor jitter, in ppm, added to the query spectra only.
 #
@@ -156,18 +167,24 @@ def main() -> None:
             for k in d.inchikey14[d.inchikey14.notna() & (d.instrument_type != QINSTR)]:
                 other[k] = other.get(k, 0) + 1
     # The real test averages three spectra per molecule; ask for at least two.
-    pool = [k for k, n in seen.items() if n >= 2]
+    pool = [k for k, n in seen.items() if n >= MIN_SPEC]
     if MODE == "xinstr":
         # needs its own spectra on another instrument to stay in the library
         pool = [k for k, n in seen.items() if n >= 1 and other.get(k, 0) >= 1]
     if KEYS_FILE:
         allow = set(Path(KEYS_FILE).read_text().split())
         pool = sorted(k for k in pool if k in allow)
+    if EXCLUDE:
+        ban = set()
+        for fn in EXCLUDE.split(","):
+            ban |= {l.split("	")[0].strip() for l in open(ROOT / fn if not Path(fn).is_absolute() else fn,
+                                                          encoding="utf-8") if l.strip()}
+        pool = sorted(k for k in pool if k not in ban)
     print(f"mode {MODE}; jitter {JITTER_PPM} ppm; eligible molecules: {len(pool)}")
     held = set(RNG.choice(pool, size=min(N_MOL, len(pool)), replace=False))
 
-    lib_head = open(ROOT / f"{PREFIX}_head.bin", "wb")
-    lib_peaks = open(ROOT / f"{PREFIX}_peaks.bin", "wb")
+    lib_head = open(ROOT / f"{PREFIX}_head.bin" if not NO_LIB else __import__("os").devnull, "wb")
+    lib_peaks = open(ROOT / f"{PREFIX}_peaks.bin" if not NO_LIB else __import__("os").devnull, "wb")
     qry_head = open(ROOT / f"{QPREFIX}_head.bin", "wb")
     qry_peaks = open(ROOT / f"{QPREFIX}_peaks.bin", "wb")
     lib_mols: dict[str, int] = {}
@@ -260,7 +277,8 @@ def main() -> None:
 
     for h in (lib_head, lib_peaks, qry_head, qry_peaks):
         h.close()
-    (ROOT / f"{PREFIX}_mols.txt").write_text(
+    if not NO_LIB:
+      (ROOT / f"{PREFIX}_mols.txt").write_text(
         "\n".join(f"{a}\t{b}" for a, b in zip(lib_names, lib_smiles)), encoding="utf-8")
     (ROOT / f"{QPREFIX}_mols.txt").write_text(
         "\n".join(f"{a}\t{b}" for a, b in zip(qry_names, qry_truth)), encoding="utf-8")
