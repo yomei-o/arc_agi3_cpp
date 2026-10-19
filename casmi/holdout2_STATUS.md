@@ -92,3 +92,22 @@ hcqry の知名度: 選んだ 400 分子 平均 1.99→**2.09**（目標 1.99、
 ### LambdaMART の LB 悪化の切り分け（どれも再現せず）
 1. 本番モデル（fwd_mlp_rank_v2 / rev2_all_v4k、train 全体で学習 = 漏れあり、手の融合とランカーに同じ漏れ）で v25→v26: hasqry +0.002（0.833→0.835）、hcqry **+0.030**（0.550→0.580）、haqry rm **+0.039**（0.261→0.300）→ 「学習時と本番で特徴を作るモデルが違う」ズレでは悪化しない。
 2. 前駆体ジッタ 1.5 ppm（timsTOF の実測誤差 precursor_error_ppm は enveda-180 で中央値 0.98・p90 2.76 ppm、train の precursor_mz は計算値でジッタ 0 だと正解の merr ≈ 0 が漏れになる; merr は lmart_prod で 214 分岐に使用）: hajqry +0.017（0.535→0.552）、hcjqry −0.001（0.511→0.510）、hasjqry −0.013（0.835→0.822）→ ジッタでも悪化は再現せず。
+3. **xinstr holdout hxqry**（timsTOF・245–461 のクエリ、正解の他装置スペクトルだけがライブラリに残る = 「隠しテストの分子が train に別装置で載っている」場合。`make_holdout.py C:\prog\casmi --mode xinstr --floor 0.002 --exclude <旧6組+ha,hb,hc,has,hbs> --seed 2606 --no-lib --prefix hxlib,hxqry`、400 分子 1163 スペクトル、知名度 1.30 = 普通の分子。ライブラリ zlib = `build_ylib.py ... alllib zlib haqry,hbqry,hcqry hasqry,hbsqry hxqry`（hx 分子の timsTOF 2630 本を除く）、rev 系は zlib で学び直し rev2_z.bin / rev_z3072.bin、MLP は ylib のもの（17次元・2万分子、漏れは無視できる）:
+   v20 0.870 / v21 0.779 / v23 0.874 / v24 0.864 / v25 0.864 / v26 **0.886** → 学習重み −0.091、REV2 +0.004、生成 −0.010、PubChem 0、**LambdaMART +0.022**。sibling と同じ型で、LambdaMART の悪化は出ない。
+
+ジッタ版の他の版（v20/v21/v23/v24）: hajqry 0.548/0.609/0.557/0.539、hcjqry 0.528/0.586/0.533/0.513、rm v25/v26 hajqry 0.242/0.268・hcjqry 0.204/0.235 → ジッタ 1.5 ppm は全体を −0.003 ずらすだけで差分は変わらない（途中で止めた残り: hasjqry v21–v24, rm v24）。
+
+### PubChem 知名度（holdout の正解 400 分子全部、`pop_sample.py keys`）
+haqry 4.94（≥1 にしても有名）/ hasqry 5.31 / **hcqry 2.09** / hbqry 1.30 / **hxqry 1.30**。
+
+## 結論
+- **LB の差分の並びを単独で再現する holdout はない**。各成分で見た符号:
+  denovo（ha/hc/hb）= v21 が大きく＋（LB −）、生成が −（LB ＋）。sibling/xinstr（has/hbs/hx）= v21 は正しく −、生成は −。rm（正解がプール外）= 生成・PubChem・LambdaMART がすべて大きく＋。
+- 差分（v21・REV2・生成・PubChem の 4 つ）は混合 **0.5·hasqry + 0.42·hcqry + 0.08·hcqry rm** でほぼ再現（v21 −0.042 / REV2 +0.004 / 生成 +0.006 / PubChem +0.003、LB は −0.041 / +0.014 / +0.009 / −0.001）。ただし LambdaMART は −0.002（LB −0.035、FPNet 外しの分を引いても −0.027）で再現しない。
+- 絶対値は混合でも 0.62 前後で LB の約 2 倍。割合を変えて絶対値に合わせると差分が崩れる → 隠しテストは成分の割合ではなく「1 問ごとに手元より難しい」（未知の要因: スペクトルの取り方・分子の種類・候補窓の混み具合など）。
+- **LambdaMART の悪化は、知名度・モード（denovo/sibling/xinstr/プール外）・本番モデルとのズレ・前駆体ジッタのどれでも再現しない**（手元は 9 成分中 7 で＋）。LB の SE（この差分で 0.01〜0.015）と FPNet 外しを考えると、偶然の可能性も否定できない。
+
+## 次の物差し（推奨）
+- 新しい変更は **hasqry（or hxqry）・hcqry・hcqry rm の 3 成分を別々に** 測り、0.5 / 0.42 / 0.08 の混合を主指標に、成分ごとの符号も見る。学習を伴うもの（融合の重み、ランカー）は「S 成分で悪化しないか」を必須条件にする（v21 の失敗は S で −0.13 として見えていた）。
+- 絶対値の比較はしない（LB ≈ 0.47 × 混合）。
+- LambdaMART は手元では判定できない。LB で切り分けるなら v25 から FPNet だけ外した版（LambdaMART なし）を 1 回出すと「FPNet 外し」と「ランカー」を分離できる。

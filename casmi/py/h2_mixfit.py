@@ -21,7 +21,7 @@ def comp(name):
     return {v: R.get(f"{name}_{v}") for v in VERS}
 
 
-S = ["hasqry", "hbsqry"]
+S = ["hasqry", "hbsqry", "hxqry"]
 D = ["haqry", "hcqry", "hbqry"]
 RM = ["haqry_rm", "hcqry_rm", "hbqry_rm"]
 res = []

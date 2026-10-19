@@ -23,7 +23,7 @@ def rr(path, truth):
     return np.array([1.0 / (c.get(k, []).index(k) + 1) if k in c.get(k, []) else 0.0 for k in truth])
 
 
-for q, suf in [("haqry", ""), ("hcqry", ""), ("hbqry", ""), ("hasqry", ""), ("hbsqry", ""),
+for q, suf in [("haqry", ""), ("hcqry", ""), ("hbqry", ""), ("hasqry", ""), ("hbsqry", ""), ("hxqry", ""),
                ("haqry", "_rm"), ("hcqry", "_rm"), ("hbqry", "_rm"),
                ("hasqry", "_prod"), ("hcqry", "_prod"), ("haqry", "_rm_prod")]:
     truth = [l.split("\t")[0] for l in open(D / f"{q}_mols.txt", encoding="utf-8") if l.strip()]
