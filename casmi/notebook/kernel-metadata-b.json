@@ -10,7 +10,8 @@
   "dataset_sources": [
     "yomeiotani/casmi26-rdkit-min",
     "yomeiotani/casmi26-pool-expanded",
-    "yomeiotani/casmi26-fpnet-pool"
+    "yomeiotani/casmi26-fpnet-pool",
+    "yomeiotani/casmi26-pubchem-whole"
   ],
   "kernel_sources": [],
   "competition_sources": [
