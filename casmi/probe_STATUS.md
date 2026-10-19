@@ -86,5 +86,5 @@ Caveats:
 
 ## Resume
 Everything above is finished (16:35, 2026-10-19); nothing is running. Outputs on the build machine: C:\prog\casmi\probe\pr_{hc1,hc0,ha1,hb1}.{csv,_smi.csv,_plain.csv,log}.
-Rerun one: `C:\prog\casmiwdmodel\probeun.bat <qry> ylib fwd_mlp_rank_ylib.bin rev2_y.bin <tag> ",rm=1"` (6 threads, ~10–13 min).
+Rerun one: `C:\prog\casmi\fwdmodel\probe\run.bat <qry> ylib fwd_mlp_rank_ylib.bin rev2_y.bin <tag> ",rm=1"` (6 threads, ~10-13 min).
 Possible improvement (not done): IK14-level exclusion (tautomer/charge-normalized key) would remove the 0.013 leak; rdkit-min has no InChI.
