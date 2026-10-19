@@ -27,8 +27,8 @@ leak = MRR on in-pool answers (hcqry normal; should be ~0 if the exclusion works
 |---|---|---|---|---|---|
 | pr_hc1 | hcqry rm=1 (answer out of pool) = **m_out** | 0.484 | **0.497 [0.452, 0.543]** | 239 / 178 of 400 | 24.4 |
 | pr_hc0 | hcqry normal (answer in pool) = **leak** | 0.000 | **0.013 [0.004, 0.024]** | 10 / 4 | 24.4 |
-HA_ROW
-HB_ROW
+| pr_ha1 | haqry rm=1 (COCONUT ≥1 spectrum, pop 4.94 = famous) | 0.540 | **0.550 [0.504, 0.598]** | 263 / 202 | 24.6 |
+| pr_hb1 | hbqry rm=1 (timsTOF 245-461 = enveda-180-like synthetic, pop 1.30, window 14,545/query) | 0.274 | **0.278 [0.236, 0.320]** | 133 / 98 | 25.0 |
 
 - For reference the normal (plain) list on hcqry rm=1 scores 0.151 (generation only), and the window has 6,677 PubChem compounds per
   query (median 3,687); the truth is among the ~48 fully scored PubChem candidates in 58.5% of queries.
@@ -46,13 +46,17 @@ LB_probe ≈ f_out · m_out + (1 − f_out) · leak  →  **f_out ≈ (LB_probe 
 |---|---|---|---|---|---|---|---|
 | f_out (m_out 0.497) | 0.04 | 0.08 | 0.18 | 0.28 | 0.39 | 0.49 | 0.70 |
 | range from the m_out CI (0.452–0.543) | | | 0.16–0.20 | 0.25–0.31 | 0.35–0.43 | 0.45–0.54 | 0.64–0.76 |
+| f_out if the hidden out-of-pool answers are enveda-180-like (m_out 0.278, hbqry) | 0.06 | 0.14 | 0.33 | 0.52 | 0.71 | 0.89 | >1 |
 (plus the public-LB sampling error, ~130 molecules: per-query RR² mean ~0.46 on hcqry rm=1 → SE of LB_probe ≈ 0.035 at f=0.5, ≈ 0.025 at f=0.2.)
 
 Caveats:
 1. The probe measures f_out · m_out_hidden; reading it as f_out assumes the hidden out-of-pool answers are as findable as hcqry's.
    If they are e.g. enveda-180-like synthetic molecules (PubChem pop ~1.3, 92% in PubChem) or not in PubChem at all, m_out_hidden
-   is smaller and f_out is underestimated → see the hbqry point (pop 1.30) as a lower-fame m_out.
-2. **Prior expectation is already in tension with f_out ≈ 0.7**: with m_out ~0.5, f_out = 0.7 would give a probe LB ~0.35, and the
+   is smaller and f_out is underestimated. Measured: NP-like hcqry 0.497, famous haqry 0.550, **enveda-180-like hbqry 0.278**
+   (bigger windows, 14.5k vs 6.7k; truth among the 50 fully scored only 33% vs 59%). So m_out spans ~0.28–0.50 by molecule
+   type, and the f_out read from one LB number carries that factor ~1.8 (rows above). Since 65% of train molecules are
+   enveda-180 and the hidden test is timsTOF, the enveda-like row may be the more relevant one for the synthetic part.
+2. **Prior expectation is already in tension with f_out ≈ 0.7**: with m_out ~0.5, f_out = 0.7 would give a probe LB ~0.35 (~0.20 with the enveda-like m_out 0.278), and the
    old PubChem channel B (v25) would have moved the LB by much more than ±0.001. Either f_out is small, or the hidden out-of-pool
    answers are much harder than hcqry rm=1 (outside PubChem / outside the ±10 ppm window / unusual adducts). The probe LB alone
    cannot separate "few out of pool" from "out of pool and not findable"; both say "selecting inside the PubChem window" is not
@@ -79,3 +83,8 @@ Caveats:
    - `final: rows ...` ; then submit that version once.
    Expected time: as v28b (PubChem v2 ~1.4–2.5 thread-s/query → 400 queries ~4–8 min on 4 cores + table load 1–2 min), memory +1.8 GB.
 4. Interpret with the table above.
+
+## Resume
+Everything above is finished (16:35, 2026-10-19); nothing is running. Outputs on the build machine: C:\prog\casmi\probe\pr_{hc1,hc0,ha1,hb1}.{csv,_smi.csv,_plain.csv,log}.
+Rerun one: `C:\prog\casmiwdmodel\probeun.bat <qry> ylib fwd_mlp_rank_ylib.bin rev2_y.bin <tag> ",rm=1"` (6 threads, ~10–13 min).
+Possible improvement (not done): IK14-level exclusion (tautomer/charge-normalized key) would remove the 0.013 leak; rdkit-min has no InChI.
