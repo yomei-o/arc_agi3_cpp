@@ -1,7 +1,8 @@
 // win_build: cache of the PubChem mass windows of a query set (the "window
 // MRR" yardstick of fp3_STATUS.md).
 //
-//   win_build <dir> <qry> <pcdir> <out_stem> [ppm=10] [threads=8]
+//   win_build <dir> <qry> <pcdir> <out_stem> [ppm=10] [threads=8] [sampleK=0] [seed=1]
+//   (sampleK > 0: only ~sampleK random compounds of each window = training decoys)
 //
 // For each query molecule of <qry> (<qry>_head.bin / _mols.txt = name \t truth
 // SMILES): one neutral-mass window per spectrum (same adduct shifts as
@@ -81,6 +82,9 @@ int main(int argc, char** argv) {
   std::string dir = argv[1], qry = argv[2], pcdir = argv[3], out = argv[4];
   double ppm = argc > 5 ? std::atof(argv[5]) : 10.0;
   int nThr = argc > 6 ? std::atoi(argv[6]) : 8;
+  // sampleK > 0: keep only ~sampleK random compounds per window (decoys for training)
+  const uint64_t sampleK = argc > 7 ? uint64_t(std::atoll(argv[7])) : 0;
+  const uint64_t seed = argc > 8 ? uint64_t(std::atoll(argv[8])) : 1;
 
   std::vector<Head> head;
   rd(dir + "/" + qry + "_head.bin", head);
@@ -141,6 +145,8 @@ int main(int argc, char** argv) {
         }
         std::string tkey = tsmi[q].empty() ? std::string() : canonKey(tsmi[q]);
         std::unordered_map<std::string, int> idx;
+        uint64_t R = 0;
+        for (auto& r : mr) R += r.second - r.first;
         for (auto& r : mr) {
           uint64_t o0 = pcOff[r.first], o1 = pcOff[r.second];
           buf.resize(size_t(o1 - o0));
@@ -148,6 +154,11 @@ int main(int argc, char** argv) {
           fs.read(buf.data(), std::streamsize(o1 - o0));
           for (size_t k = r.first; k < r.second; ++k) {
             ++o.raw;
+            if (sampleK > 0 && R > sampleK) {
+              uint64_t x = (uint64_t(k) + seed * 0x9E3779B97F4A7C15ull) * 0xBF58476D1CE4E5B9ull;
+              x ^= x >> 31; x *= 0x94D049BB133111EBull; x ^= x >> 29;
+              if (x % R >= sampleK) continue;
+            }
             std::string key = canonKey(buf.substr(size_t(pcOff[k] - o0), size_t(pcOff[k + 1] - pcOff[k])));
             if (key.empty()) continue;
             auto it = idx.find(key);

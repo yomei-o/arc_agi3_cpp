@@ -38,7 +38,7 @@
 #include <vector>
 
 #include "parallel.hpp"
-#include "rev2_model.hpp"
+#include "rev3_model.hpp"
 
 using namespace rev2;
 
@@ -542,19 +542,68 @@ int main(int argc, char** argv) {
   for (int h : m.H) std::printf(" %d", h);
   std::printf(", %d bits\n", m.NB);
 
-  m.init(seed);
+  // ---- rev3: within-window contrastive term (ctr=<decoy win stem>, see fp3_STATUS.md)
+  //   ctr=d_wlib : <ctr>_win.bin (win_build sampleK on a query set of library molecules,
+  //                ctrq=<that query stem> for the molecule names), decoy bits <ctr>_<fp>.bin
+  //   lam=0.5 ctrS=0.2 : loss += lam * CE(softmax(ctrS * logit-sum score) over truth + decoys)
+  //   init=<model.bin> : start from a trained model (fine-tune) instead of random init
+  std::string ctrStem = get(A, "ctr", "");
+  float lam = float(std::atof(get(A, "lam", "0.5").c_str())), ctrS = float(std::atof(get(A, "ctrS", "0.2").c_str()));
+  int maxDec = std::atoi(get(A, "maxDec", "64").c_str());
+  std::vector<std::vector<uint32_t>> decOf(lib_s.name.size());
+  Fps dfp;
+  if (!ctrStem.empty()) {
+    std::unordered_map<std::string, int> libIdx;
+    for (size_t i = 0; i < lib_s.name.size(); ++i) libIdx[lib_s.name[i]] = int(i);
+    std::vector<std::string> qn;
+    {
+      std::ifstream f(dir + "/" + get(A, "ctrq", "dq") + "_mols.txt");
+      std::string line;
+      while (std::getline(f, line)) qn.push_back(line.substr(0, line.find('\t')));
+    }
+    std::vector<char> wb = slurp(dir + "/" + ctrStem + "_win.bin");
+    const char* p = wb.data();
+    uint32_t nq; std::memcpy(&nq, p, 4); p += 4;
+    size_t nWith = 0, nDec = 0;
+    for (uint32_t q = 0; q < nq; ++q) {
+      int32_t mol, tr; uint32_t n;
+      std::memcpy(&mol, p, 4); std::memcpy(&tr, p + 4, 4); std::memcpy(&n, p + 8, 4); p += 12;
+      const uint32_t* ids = reinterpret_cast<const uint32_t*>(p); p += 4 * size_t(n);
+      if (mol < 0 || mol >= int(qn.size())) continue;
+      auto it = libIdx.find(qn[mol]);
+      if (it == libIdx.end()) continue;
+      auto& d = decOf[it->second];
+      for (uint32_t k = 0; k < n && int(d.size()) < maxDec; ++k) if (int(k) != tr) d.push_back(ids[k]);
+      if (!d.empty()) { ++nWith; nDec += d.size(); }
+    }
+    dfp = loadFps(dir + "/" + ctrStem + "_" + fp + ".bin");
+    std::printf("contrastive: %zu library molecules with decoys (mean %.1f), lam %g, scale %g\n", nWith,
+                double(nDec) / std::max<size_t>(1, nWith), lam, ctrS);
+  }
+  if (A.count("init")) {
+    if (!m.load(dir + "/" + A["init"], true) || m.NB != int(fps.nBits)) { std::fprintf(stderr, "bad init model\n"); return 1; }
+    std::printf("init from %s\n", A["init"].c_str());
+    if (fp != "ecfp") loadVocab(dir + "/" + fp + ".bin", m);
+  } else {
+    m.init(seed);
+  }
   m.reserve(B);
+  bk::Buffer<float> gExtra;
+  std::vector<float> Zh, Gh;
+  double ctrLoss = 0, ctrAcc = 0; size_t ctrN = 0;
   int stepsPerEpoch = int(idx.size() / size_t(B));
   int totalSteps = stepsPerEpoch * epochs, step = 0;
   uint64_t rng = 12345 + seed * 7919;
-  struct Batch { std::vector<std::vector<std::pair<int, float>>> rows; std::vector<float> T; };
+  struct Batch { std::vector<std::vector<std::pair<int, float>>> rows; std::vector<float> T; std::vector<int> mol; };
   Batch cur, nxt;
   auto prep = [&](Batch& bt, int st) {
     bt.rows.resize(B);
+    bt.mol.resize(B);
     bt.T.assign(size_t(B) * m.NB, 0.f);
     ::parallel_for(B, [&](int64_t b) {
       const Head& h = lib_s.head[idx[size_t(st) * B + b]];
       featurize(m.fc, h, lib_s.mzs(h), lib_s.its(h), bt.rows[b]);
+      bt.mol[b] = h.mol;
       for (uint32_t k = fps.ptr[h.mol]; k < fps.ptr[h.mol + 1]; ++k) bt.T[size_t(b) * m.NB + fps.bits[k]] = 1.f;
     });
   };
@@ -574,6 +623,43 @@ int main(int argc, char** argv) {
       m.setBatch(cur.rows, true);
       upload(m.T, cur.T);
       m.forward(B, true, dropout, uint64_t(step));
+      if (!ctrStem.empty() && lam > 0.f) {
+        download(m.Zo, Zh, int64_t(B) * m.NB);
+        Gh.assign(size_t(B) * m.NB, 0.f);
+        std::vector<double> lb(B, 0.0), ab(B, 0.0);
+        std::vector<char> has(B, 0);
+        ::parallel_for(B, [&](int64_t b) {
+          const auto& d = decOf[cur.mol[b]];
+          if (d.empty()) return;
+          has[b] = 1;
+          const float* z = Zh.data() + size_t(b) * m.NB;
+          float* g = Gh.data() + size_t(b) * m.NB;
+          const int nc = int(d.size()) + 1;
+          std::vector<double> sc(nc);
+          auto bitsOf = [&](int c, const uint16_t*& bp, int& n) {
+            if (c == 0) { bp = fps.bits.data() + fps.ptr[cur.mol[b]]; n = int(fps.ptr[cur.mol[b] + 1] - fps.ptr[cur.mol[b]]); }
+            else { uint32_t u = d[c - 1]; bp = dfp.bits.data() + dfp.ptr[u]; n = int(dfp.ptr[u + 1] - dfp.ptr[u]); }
+          };
+          double mx = -1e30;
+          for (int c = 0; c < nc; ++c) {
+            const uint16_t* bp; int n; bitsOf(c, bp, n);
+            double s = 0; for (int k = 0; k < n; ++k) s += z[bp[k]];
+            sc[c] = ctrS * s; mx = std::max(mx, sc[c]);
+          }
+          double Z = 0; for (double& x : sc) { x = std::exp(x - mx); Z += x; }
+          int better = 0;
+          for (int c = 1; c < nc; ++c) better += sc[c] >= sc[0];
+          lb[b] = -std::log(std::max(1e-30, sc[0] / Z)); ab[b] = better == 0;
+          for (int c = 0; c < nc; ++c) {
+            double coef = lam * ctrS * (sc[c] / Z - (c == 0 ? 1.0 : 0.0)) / B;
+            const uint16_t* bp; int n; bitsOf(c, bp, n);
+            for (int k = 0; k < n; ++k) g[bp[k]] += float(coef);
+          }
+        });
+        for (int b = 0; b < B; ++b) if (has[b]) { ctrLoss += lb[b]; ctrAcc += ab[b]; ++ctrN; }
+        upload(gExtra, Gh);
+        m.extraGrad = gExtra.data();
+      }
       m.backward(B, pw, ls);
       float t = float(step) / float(std::max(1, totalSteps));
       float lrNow = step < warm ? lr * float(step + 1) / float(warm) : lr * 0.5f * (1.f + std::cos(3.14159265f * t));
@@ -586,7 +672,10 @@ int main(int argc, char** argv) {
           l -= cur.T[i] > 0.f ? std::log(pp) : std::log(1.f - pp);
         }
         double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        std::printf("ep %d step %d/%d  loss/spectrum %.3f  lr %.6f  %.0fs\n", ep, st, stepsPerEpoch, l / B, lrNow, sec);
+        std::printf("ep %d step %d/%d  loss/spectrum %.3f  lr %.6f  %.0fs", ep, st, stepsPerEpoch, l / B, lrNow, sec);
+        if (ctrN) std::printf("  ctr CE %.3f top1 %.3f (n %zu)", ctrLoss / ctrN, ctrAcc / ctrN, ctrN);
+        std::printf("\n");
+        ctrLoss = ctrAcc = 0; ctrN = 0;
         std::fflush(stdout);
       }
       if (th.joinable()) th.join();

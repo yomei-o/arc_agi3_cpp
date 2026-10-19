@@ -3,7 +3,7 @@ rem build.bat : rev3 tools on the build machine (C:\prog\casmi\fwdmodel\rev3; he
 setlocal
 for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath`) do set VSPATH=%%i
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
-cd /d C:\prog\casmi\fwdmodel\rev3
+cd /d %~dp0
 set L=C:\prog\casmi\fwdmodel\ana\build\rdkitmin
 set LIBS=%L%\SmilesParse.lib %L%\CIPLabeler.lib %L%\GraphMol.lib %L%\Geometry.lib %L%\DataStructs.lib %L%\RDGeneral.lib
 for %%s in (win_build fp3_prep) do (
