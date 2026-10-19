@@ -14,6 +14,7 @@ import sys
 from collections import defaultdict
 
 
+ASIS = False  # --asis: keep the dump's PubChem order (pcrank=fused runs)
 POP = None  # --pop <pool_mols.txt> <pop.bin>: pool popularity by candidate name (overrides the dump's pop column)
 
 
@@ -36,7 +37,7 @@ def load(mols, d, tag):
         elif p[0] == "V2":
             cur["v2"] = dict(mean=float(p[1]), sd=float(p[2]), relz=float(p[3]), S=float(p[4]), pop=float(p[5]))
         else:
-            cur["pc"].append(dict(cid=p[0], truth=p[1] == "1", rev=float(p[2]), pop=float(p[3])))
+            cur["pc"].append(dict(cid=p[0], truth=p[1] == "1", rev=float(p[2]), pop=float(p[3]), fused=float(p[7])))
     return truth, pp, det
 
 
@@ -56,14 +57,14 @@ def base_list(q, pp, ppw, ppn):
 
 
 def simulate(truth, pp, det, ppw=0.0, ppn=60, pc=False, pcw=0.15, gate=0.9, relhi=1e9, relp=1e9, sp=1e9, popp=5.0,
-             slo=(4, 8, 12, 16, 20), shi=(2, 4, 6, 8, 10), stats=None):
+             slo=(4, 8, 12, 16, 20), shi=(2, 4, 6, 8, 10), stats=None, asis=False, ppgate=9.0):
     tot = 0.0
     for q in truth:
-        L = base_list(q, pp, ppw, ppn)
         D = det.get(q)
+        L = base_list(q, pp, ppw if (D is None or D["lib"] < ppgate) else 0.0, ppn)
         if pc and D and D["v2"] and D["pc"] and D["lib"] < gate:
             v = D["v2"]
-            c = sorted(D["pc"], key=lambda e: -((e["rev"] - v["mean"]) / v["sd"] + pcw * e["pop"]))
+            c = list(D["pc"]) if (asis or ASIS) else sorted(D["pc"], key=lambda e: -((e["rev"] - v["mean"]) / v["sd"] + pcw * e["pop"]))
             hi = v["relz"] > relhi
             sl = set(shi if hi else slo)
             k = len(sl)
@@ -98,6 +99,8 @@ CONFIGS = [
     ("ppop 0.15", dict(ppw=0.15)),
     ("ppop 0.25", dict(ppw=0.25)),
     ("ppop 0.50", dict(ppw=0.50)),
+    ("ppop 0.15 gate lib<0.9", dict(ppw=0.15, ppgate=0.9)),
+    ("ppop 0.15 gate lib<0.7", dict(ppw=0.15, ppgate=0.7)),
     ("pc slots lo only", dict(pc=True)),
     ("pc lo, pcw .25", dict(pc=True, pcw=0.25)),
     ("pc lo, pcw 0", dict(pc=True, pcw=0.0)),
@@ -111,12 +114,18 @@ for s in (4, 5, 6, 8):
 for rp in (2, 3, 4):
     for s in (6,):
         CONFIGS.append((f"pc relhi 6 prom relz>{rp}|S>{s}&pop>=5", dict(pc=True, relhi=6, relp=rp, sp=s)))
-        CONFIGS.append((f"  + ppop .15", dict(pc=True, relhi=6, relp=rp, sp=s, ppw=0.15)))
+        CONFIGS.append((f"  + ppop .15 (relz>{rp})", dict(pc=True, relhi=6, relp=rp, sp=s, ppw=0.15)))
+
+
+CONFIGS.append(("CHOSEN relhi6 relz>3|S>6&pop>=5 +ppop.15 gate.9", dict(pc=True, relhi=6, relp=3, sp=6, ppw=0.15, ppgate=0.9)))
 
 
 def main():
-    global POP
+    global POP, ASIS
     a = sys.argv[1:]
+    if a and a[0] == "--asis":
+        ASIS = True
+        a = a[1:]
     if a and a[0] == "--pop":
         import numpy as np
         nm = [l.split("\t", 1)[0].strip() for l in open(a[1], encoding="utf-8")]

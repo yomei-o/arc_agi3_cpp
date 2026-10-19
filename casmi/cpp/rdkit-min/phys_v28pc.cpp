@@ -11,6 +11,8 @@
 //   ppopf=file    float32 per pool molecule, aligned with <pool>_mols.txt
 //                 (default <dir>/pool730_pop.bin; absolute path allowed)
 //   ppn=N         re-ordered depth (default 60)
+//   ppgate=x      only when the main candidates' best library similarity < x (default off;
+//                 0.9 recommended: a library identity match is not overridden by popularity)
 //   ppdet=file    per query the top max(ppn,25) before this step (offline grids)
 // PubChem channel v2 (pc=1,pcv=2 + the pc/pcdir keys below):
 //   every compound of the +-ppm windows gets its REV2 score r (sum of logits over its
@@ -810,6 +812,9 @@ int main(int argc, char** argv) {
   // (z over those pool candidates); generated candidates keep their places
   const float ppW = float(optF("ppop", 0.0));
   const int ppN = optI("ppn", 60);
+  // ppgate=x: skip the re-order when the best library similarity of the main candidates
+  // is >= x (a library identity match: popularity should not override it)
+  const float ppGate = float(optF("ppgate", 1e9));
   std::vector<float> poolPop;
   if (ppW != 0.f || opt.count("ppopf")) {
     std::string pf = opt.count("ppopf") ? opt["ppopf"] : std::string("pool730_pop.bin");
@@ -821,8 +826,8 @@ int main(int argc, char** argv) {
       poolPop.resize(size_t(n) / 4);
       f.read(reinterpret_cast<char*>(poolPop.data()), std::streamsize(poolPop.size() * 4));
     }
-    std::printf("pool popularity: %s, %zu values, weight %g over the top %d (pool candidates only)%s\n", pth.c_str(),
-                poolPop.size(), ppW, ppN, poolPop.empty() ? " - FILE MISSING, POOL POP DISABLED" : "");
+    std::printf("pool popularity: %s, %zu values, weight %g over the top %d (pool candidates only), only when best libSim < %g%s\n",
+                pth.c_str(), poolPop.size(), ppW, ppN, ppGate, poolPop.empty() ? " - FILE MISSING, POOL POP DISABLED" : "");
   }
   const std::string pcDir = opt.count("pcdir") ? opt["pcdir"] : dir;
   std::vector<float> pcMass, pcPopV;
@@ -2157,7 +2162,9 @@ int main(int argc, char** argv) {
               << (c >= 0 && size_t(c) < poolPop.size() ? poolPop[c] : 0.f) << "\t" << candName(q, o[r]) << "\n";
       }
     // pool popularity: re-fill the pool candidates' places within the top ppN
-    if (ppW != 0.f && !poolPop.empty() && scores[qi].size() == q.cand.size()) {
+    float libBest = 0.f;
+    for (float l : q.libSim) libBest = std::max(libBest, l);
+    if (ppW != 0.f && !poolPop.empty() && scores[qi].size() == q.cand.size() && libBest < ppGate) {
       std::vector<int> posP, idxP;
       for (size_t r = 0; r < o.size() && int(r) < ppN; ++r)
         if (q.cand[o[r]] >= 0) { posP.push_back(int(r)); idxP.push_back(o[r]); }
