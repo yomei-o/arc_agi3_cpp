@@ -52,6 +52,33 @@ Logs `C:\prog\casmi\night\pc4_lane?.log` ("done <tag>", "ALLDONE"); results = la
 v30 reference (pc3): hcT1 rm=1 inserted **0.2152** (plain 0.1514; logit form hcD1 0.2014); hcT0 inserted **0.5255** (plain 0.5328);
 pubchem 2.7 s/query (thread time, v30).
 
+### Results (2026-10-20 ~15:50)
+Production model: **`C:\prog\casmi\rev3_all_fp3c16k_big.bin`, 549,224,504 bytes** (2185 s; calibration 13,859 held-out
+molecules, BCE/mol 809.5 -> Platt 755.6, bits F1>=0.5 3406/16384). Copied to `C:\prog\casmi\pc4\ds_add\pool730\`.
+Sanity (`pc4\prod_wineval_hcqry.log`, leaky: alllib contains hcqry): window Tanimoto MRR_in 0.592, shuffled 0.032 -> loads and scores fine.
+
+Holdout (MRR@25 by mrr.py on the final inserted list; "PubChem-list MRR" = truth's 1/rank inside the 50-long
+fused PubChem list from the pcdet dump, `py/pc_det_rank.py`):
+| set | v30 logit (hcD1) | v30 pcrev=tan | **v32 pcfp** | Δ v32−v30tan |
+|---|---|---|---|---|
+| hcqry rm=1, inserted | 0.2014 | 0.2152 (hcT1) | **0.2173** (hc32_1) | +0.002 |
+| hcqry rm=1, truth among the 50 listed | 124 | 149 | **159** | +10 |
+| hcqry rm=1, PubChem-list MRR@25 / top1 / top10 | 0.236 / 81 / 118 | 0.283 / 97 / 142 | **0.296 / 101 / 147** | +0.013 |
+| hcqry (answer in pool), inserted | – | 0.5255 (hcT0) | 0.5256 (hc32_0) | +0.000 |
+| hasqry (sibling), inserted | – | 0.8374 (has30_0) | 0.8362 (has32_0) | −0.001 |
+Plain (no insertion) is identical by construction (0.1514 / 0.5328 / 0.8393).
+Reading: the fp3 model improves the PubChem list itself (+10 truths listed, +0.013 list MRR on answer-removed hcqry), but
+the final score moves little (+0.002) because the list is re-ranked by the hand fusion (pcrank=fused: phys/MLP/analog
++ z(rev)) and only a few gated slots are inserted. Check pcrank=rev (lanes E/F below) to see whether the fp3 gain
+survives when the list order is the rev score itself.
+
+Timing (thread-seconds, MSVC build, CPU): fp3 model load+forward **34.5 s per run = 86 ms/query** (400 queries);
+PubChem stage v30 1.25 s/query (hasqry, window 6.9k) -> v32 2.19 s/query; hcqry 2.70 (v30) -> 2.31 s/query (v32;
+noise from machine load — the fp3 bits replace REV2's fp2 bits for window candidates, so the extra cost is only the
+non-ECFP fp3 kinds). Extra ≈ 0.14 ms per window candidate -> a 13k window ≈ +1.8 s/query single thread; 400 queries on
+Kaggle's 4 threads ≈ +3 min. **No cap needed: default pcfptop=0 (every window candidate) chosen**; pcfptop=N is there if
+the hidden set is much larger.
+
 RESULTS_PLACEHOLDER
 
 ## Resume
