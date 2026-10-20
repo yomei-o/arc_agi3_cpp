@@ -79,6 +79,26 @@ non-ECFP fp3 kinds). Extra ≈ 0.14 ms per window candidate -> a 13k window ≈ 
 Kaggle's 4 threads ≈ +3 min. **No cap needed: default pcfptop=0 (every window candidate) chosen**; pcfptop=N is there if
 the hidden set is much larger.
 
+**Default = v30, verified**: v32 without pcfp on hcqry rm=1 (hc32nofp_1) vs pc3\hcT1: `fc /b` of both the plain csv and
+the inserted csv: no differences (`pc4\eq_csv.txt`, `eq_ins.txt`). Same-load timing on that pair: PubChem stage
+1.31 s/query (no pcfp) vs 2.31 s/query (hc32_1, pcfp) -> **+1.0 s/query for a 6.7k window (0.15 ms/candidate)**.
+
+pcrank=rev (list ordered by z(rev)+0.15 pop only), hcqry rm=1:
+| | v30 tan (hc30r_1) | v32 pcfp (hc32r_1) |
+|---|---|---|
+| inserted MRR@25 | 0.2096 | 0.2100 |
+| PubChem-list MRR@25 / top1 / top10 | 0.245 / 80 / 139 | **0.281 / 92 / 146** |
+-> with the rev order the fp3 gain in the list is +0.035 (matches the window yardstick), but the final score still
+moves +0.000. pcrank=fused stays the better configuration (0.2173).
+
+**Main finding**: the fp3 model makes the PubChem list better (fused: 0.283 -> 0.296, rev: 0.245 -> 0.281; truth
+among the 50 listed 149 -> 159 of 400) but the final MRR is capped by the slot insertion (gated fixed slots
+lo 4:8:12:16:20 / hi 2:4:6:8:10, promotion to rank 1 only at relz>3 or S>6&pop>=5): on hcqry rm=1 the list has the
+truth at its rank 1 for 101/400 queries, yet the inserted MRR is 0.217. Next lever = the insertion rule (relz / S
+thresholds were tuned on REV2 scores — the fp3 Tanimoto z has a different spread; re-tune slots/promotion with the
+pcdet dumps, e.g. with pc2_grid.py-style simulation on hc32_1_det.txt / hc32_0_det.txt / has32_0_det.txt).
+Expected LB effect of v32 as is: small positive (+0.002 on answer-removed, ±0.001 with the answer present).
+
 RESULTS_PLACEHOLDER
 
 ## Resume
