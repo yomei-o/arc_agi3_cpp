@@ -76,6 +76,24 @@ Shuffled-label control: 0.021 / 0.0002 (same as rev2_w) → the scores are spect
 Reading: hcqry truths often have a near-identical library analog (the MLP's bin lookup already exploits that, small room for the CNN); hxqry truths are novel scaffolds made of common building blocks (amides, aryl, heterocycles — the Enveda-library style), exactly where position-free detectors of losses/fragments/differences should generalize and fixed-bin weights cannot. This is the theory's prediction, but one test set: confirm on another clean ordinary-molecule holdout before believing +0.25, and check that the gain survives the full pipeline (window → final list) and the LB.
 Also note REV2 logit scoring is unusually poor on hxqry (0.090 vs cal 0.229), the CNN's is not (0.364).
 
+### 5.1b Does the symmetry add information? — ensembles, no FPNet anywhere (window MRR_in, tanimoto; cal in the logs)
+`cnn_win_eval ... ensw=` = weighted z-sum of the per-window z-scored scores (eval_ctl2_*, eval_w3_* in C:\prog\casmi\cnn\).
+| models (weights) | hcqry | hxqry |
+|---|---|---|
+| rev2_w | 0.254 | 0.299 |
+| rev2_w_s32 (same MLP, other seed) | 0.271 | 0.310 |
+| rev3_fp3c16k_big (fp3 16k MLP) | 0.327 | 0.326 |
+| cnn_a | 0.294 | **0.546** |
+| **control** rev2_w + rev2_w_s32 (1:1) | 0.263 | 0.314 |
+| two MLPs rev2_w + fp3big (1:1) | 0.331 | 0.363 |
+| rev2_w + cnn_a (1:1) | 0.297 | 0.495 |
+| **fp3big + cnn_a (1:1)** | **0.354** | 0.559 |
+| fp3big + cnn_a (0.5:1) | 0.352 | **0.576** |
+| rev2_w + fp3big + cnn_a (1:1:1) | 0.348 | 0.519 |
+| rev2_w + fp3big + cnn_a (0.25:0.25:1) | 0.339 | 0.549 |
+**Answer: yes.** A second MLP adds +0.004 (fp3big + rev2_w, hcqry) or ~0 over the better member (seed control); the CNN added to the best MLP adds **+0.027 on hcqry** (0.327 → 0.354) and +0.03 on hxqry over the CNN alone (0.546 → 0.576 at 0.5:1). The CNN errs on different queries than the MLPs — it is not a re-parametrized copy. Best robust choice on both sets: **fp3big + cnn_a, weights 0.5–1 : 1** (0.352–0.354 / 0.559–0.576); rev2_w adds nothing once fp3big is in.
+Caveat: weights were chosen on these two test sets (coarse grid of 8); the 1:1 point needs no tuning.
+
 ### 5.2 remaining day runs (cnn_g, control ensemble, cnn_np, cnn_t2): `type C:\prog\casmi\cnn\SUMMARY.txt`
 ### 5.3 night runs (night_cnn.bat, `cnn_night`, waits for the day job): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
 

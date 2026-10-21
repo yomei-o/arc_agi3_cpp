@@ -292,9 +292,27 @@ int main(int argc, char** argv) {
     std::printf(", calibrated %d, predicted in %.1fs, scored in %.1fs\n", int(m.calA.size()) == m.NB, secPred, sec);
     all.push_back(std::move(ms));
   }
-  if (ens && all.size() > 1) {
+  // ens=1: z-sum with equal weights; ensw=w1,w2,...;w1,w2,... adds one weighted z-sum per weight set
+  std::vector<std::vector<float>> wsets;
+  if (ens && all.size() > 1) wsets.push_back(std::vector<float>(all.size(), 1.f));
+  {
+    std::stringstream ws(get("ensw", ""));
+    std::string set;
+    while (std::getline(ws, set, ';')) {
+      std::vector<float> w;
+      std::stringstream s2(set);
+      std::string t;
+      while (std::getline(s2, t, ',')) w.push_back(float(std::atof(t.c_str())));
+      if (w.size() == all.size()) wsets.push_back(w);
+      else std::fprintf(stderr, "ensw set '%s' ignored (need %zu weights)\n", set.c_str(), all.size());
+    }
+  }
+  const size_t nBase = all.size();
+  for (auto& w : wsets) {
     MS e;
-    e.name = "ENSEMBLE(z-sum)";
+    e.name = "ENSEMBLE(z-sum w=";
+    for (size_t i = 0; i < w.size(); ++i) e.name += (i ? "," : "") + std::to_string(w[i]).substr(0, 4);
+    e.name += ")";
     e.s.assign(NV, std::vector<std::vector<float>>(nQ));
     e.sh.assign(NV, std::vector<std::vector<float>>(nQ));
     for (int v = 0; v < NV; ++v)
@@ -302,10 +320,10 @@ int main(int argc, char** argv) {
         for (int pass = 0; pass < 2; ++pass) {
           auto& d = pass ? e.sh[v][qi] : e.s[v][qi];
           d.assign(wins[qi].ids.size(), 0.f);
-          for (auto& ms : all) {
-            auto x = pass ? ms.sh[v][qi] : ms.s[v][qi];
+          for (size_t mi = 0; mi < nBase; ++mi) {
+            auto x = pass ? all[mi].sh[v][qi] : all[mi].s[v][qi];
             zs(x);
-            for (size_t k = 0; k < d.size(); ++k) d[k] += x[k];
+            for (size_t k = 0; k < d.size(); ++k) d[k] += w[mi] * x[k];
           }
         }
     all.push_back(std::move(e));
