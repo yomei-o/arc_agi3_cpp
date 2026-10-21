@@ -103,7 +103,7 @@ attpk=40 atttol=0.01 attmp=4` (defaults = the window-yardstick best config). Cod
 - Kaggle staging (NOT uploaded): `C:\prog\casmi\attn\ds_add\rdkit-min\phys_v34pc.cpp` + `rdkit-min\rev\fp3_v32.h` (same file as
   v32); `g++ -std=c++20 -fsyntax-only` with the Kaggle include layout: **rc 0** (`cpp/attn/kcheck34.bat`, log
   `C:\prog\casmi\attn\kcheck.log`). No new data files: the engine uses the notebook's library (train) and the v32 fp3 model.
-  Notebook change for a v34: `srcs` phys_v34pc.cpp and `,attn=1` (+ `,pcrank=rev` if adopted) in the options string.
+  Notebook change for a v34: `srcs` phys_v34pc.cpp and `,attn=1,pcrank=rev,attpool=2` in the options string.
 
 ### Final-list results (MRR@25 by mrr.py; FPNet-free; v32 = pc4 numbers)
 | set | v32 (pcfp, pcrank=fused) | **v34 attn=1, pcrank=fused** | **v34 attn=1, pcrank=rev** |
@@ -152,8 +152,8 @@ Memory: +~1.8 GB index + ~80 MB per thread.
 2. Pipeline: `ssh ... "C:\prog\casmi\attn\run34.bat <qry> ylib fwd_mlp_rank_ylib.bin rev2_y.bin <tag> 2 \",[rm=1,]pcrev=tan,pcfp=rev3_fp3c16k_big.bin,attn=1[,pcrank=rev][,attpool=w]\""`
    -> `findstr inserted C:\prog\casmi\attn\pc\<tag>.log`; list MRR `python C:\prog\casmi\attn\pc_det_rank.py <tag>_det.txt`.
 3. Next levers: (a) re-tune the PubChem insertion (slots / relz / promotion) on the new score scale using the
-   `_det.txt` dumps (pc4 RESUME: the insertion caps the gain); (b) attpool (attention in the main pool fusion) —
-   results below if finished; (c) attw 2, attk/attT on the pipeline; (d) LB: a v34 notebook = v32 notebook with
-   phys_v34pc.cpp and `,attn=1,pcrank=rev` (user decision; nothing uploaded).
+   `_det.txt` dumps (pc4 RESUME: the insertion caps the gain); (b) attpool done (2 best; try 1.5-2.5, and attw 2 / attk / attT
+   on the pipeline); (c) hxqry through the pipeline (needs a zlib-style run); (d) LB: a v34 notebook = v32 notebook with
+   phys_v34pc.cpp and `,attn=1,pcrank=rev,attpool=2` (user decision; nothing uploaded).
 4. Kaggle staging (not uploaded): re-run `C:\prog\casmi\attn\kcheck34.bat` after any source change (copies
    attn\v34\phys_v34pc.cpp into attn\ds_add\rdkit-min and runs g++ -fsyntax-only).
