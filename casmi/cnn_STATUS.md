@@ -94,7 +94,18 @@ Also note REV2 logit scoring is unusually poor on hxqry (0.090 vs cal 0.229), th
 **Answer: yes.** A second MLP adds +0.004 (fp3big + rev2_w, hcqry) or ~0 over the better member (seed control); the CNN added to the best MLP adds **+0.027 on hcqry** (0.327 → 0.354) and +0.03 on hxqry over the CNN alone (0.546 → 0.576 at 0.5:1). The CNN errs on different queries than the MLPs — it is not a re-parametrized copy. Best robust choice on both sets: **fp3big + cnn_a, weights 0.5–1 : 1** (0.352–0.354 / 0.559–0.576); rev2_w adds nothing once fp3big is in.
 Caveat: weights were chosen on these two test sets (coarse grid of 8); the 1:1 point needs no tuning.
 
-### 5.2 remaining day runs (cnn_g, control ensemble, cnn_np, cnn_t2): `type C:\prog\casmi\cnn\SUMMARY.txt`
+### 5.2 cnn_g — global max+mean pool only (pure translation-invariant readout, 15.3M params), 12 epochs (14:03)
+| tanimoto MRR_in | hcqry | hxqry |
+|---|---|---|
+| rev2_w | 0.254 | 0.299 |
+| cnn_g | 0.231 | 0.345 |
+| cnn_a (flat + pool) | 0.294 | 0.546 |
+| rev2_w + cnn_g (1:1) | 0.276 | 0.378 |
+| control rev2_w + rev2_w_s32 (1:1) | 0.263 | 0.314 |
+- Held-out loss decreases monotonically (235 -> 211.1, no overfitting, unlike cnn_a: 195 min, 201.6 end) but stays well above cnn_a's: **without position, the invariant features alone are weaker than the MLP on natural products (hcqry -0.023) and still better on ordinary molecules (hxqry +0.046)**. Position matters (the value of a loss / an ion is information); symmetry + position (cnn_a) is what wins.
+- Even the pure-invariant model is complementary to the MLP: rev2_w + cnn_g gains +0.022 / +0.079 over rev2_w, vs +0.009 / +0.015 for the seed control.
+
+### 5.2b remaining day runs (cnn_np = no pair channel, cnn_t2 = equal wall-clock): `type C:\prog\casmi\cnn\SUMMARY.txt`
 ### 5.3 night runs (night_cnn.bat, `cnn_night` pid 1260 launched 11:44, waits for the day job's "all done", ≤5 CPU threads; GPU shared by 3 agents → steps 3–5× slower than alone: cnn_f16 ~270 ms/step ≈ 4 h, the others ≈ 3 h each): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
 
 ## 6. Resume steps
