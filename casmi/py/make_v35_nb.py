@@ -14,7 +14,9 @@ import json
 from pathlib import Path
 
 BOLTZ33 = ",alloc=boltz,bT1=2,bT2=1,bpi=0.2,ba=0.25"  # pc5_STATUS.md (REV2-tan PubChem list scale)
-BOLTZ35 = ",alloc=boltz,bT1=2,bT2=0.5,bpi=0.2,ba=0.5"  # v35_STATUS.md: re-tuned on the attention score scale
+# v35_STATUS.md: re-tuned on the attention score scale was bT1=2,bT2=0.5,bpi=0.2,ba=0.5; the LB probe
+# (2026-10-21, 0.023) puts the out-of-pool share at ~2-4%, so the conservative setting (pi 0.1) is used.
+BOLTZ35 = ",alloc=boltz,bT1=3,bT2=0.5,bpi=0.1,ba=0.5"
 ATT35 = ",attn=1,attpool=2"  # attn_STATUS.md / v35_STATUS.md
 
 nbd = Path(__file__).resolve().parent.parent / "notebook"
