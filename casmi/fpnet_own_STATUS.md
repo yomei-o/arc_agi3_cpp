@@ -108,6 +108,8 @@ fp3 の目標（「hxqry clean で窓内 ≥ 0.15〜0.2」）を大きく超え�
 （公開 FPNet の LB 寄与は約 +0.02。公開重みは train 全体で学習しているのでどの holdout でも漏れており、同じ物差しでは比べられない。）
 
 ## 6. 本番モデル（alllib = train 全体、hold 0、6 エポック）
+**完了（2026-10-21 18:25）**: 6 エポック 18,653 s（後半は GPU 混雑で 1 エポック ~58 分）。`fpnet_own_f16.bin` 99,517,113 B（公開 f16 と同サイズ）、往復 OK、
+notebook と同じソースの fpnet_ggml で読み込み・順伝播 OK（hcqry 5 分子）。train 全体で学習しているので holdout の点は漏れ = 測っていない。
 - ジョブ fpown_train（PID 20064）の後半。開始 13:15、1 エポック ~37 分（19,840 step）→ **17:00 ごろ終了見込み**。終わると自動で
   `C:\prog\casmi\fpown_all.bin`（TFM1）→ `C:\prog\casmi\fpown\fpown_all_f32.bin` と **`C:\prog\casmi\fpown\ds_add\fpnet\fpnet_own_f16.bin`**（FPN2、99,517,113 B）、
   `C:\prog\casmi\fpown\progress.txt` に "all done"。
