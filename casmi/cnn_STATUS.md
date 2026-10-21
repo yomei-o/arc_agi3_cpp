@@ -105,11 +105,23 @@ Caveat: weights were chosen on these two test sets (coarse grid of 8); the 1:1 p
 - Held-out loss decreases monotonically (235 -> 211.1, no overfitting, unlike cnn_a: 195 min, 201.6 end) but stays well above cnn_a's: **without position, the invariant features alone are weaker than the MLP on natural products (hcqry -0.023) and still better on ordinary molecules (hxqry +0.046)**. Position matters (the value of a loss / an ion is information); symmetry + position (cnn_a) is what wins.
 - Even the pure-invariant model is complementary to the MLP: rev2_w + cnn_g gains +0.022 / +0.079 over rev2_w, vs +0.009 / +0.015 for the seed control.
 
-### 5.2b remaining day runs (cnn_np = no pair channel, cnn_t2 = equal wall-clock): `type C:\prog\casmi\cnn\SUMMARY.txt`
+### 5.2b cnn_np — no pair-difference channel (pairK=0): interim at matched checkpoints (16:05; final run still training, ~20 min/epoch under GPU sharing)
+| tanimoto MRR_in (uncalibrated checkpoints) | hcqry | hxqry | held-out loss/spectrum |
+|---|---|---|---|
+| cnn_np epoch 6 | 0.272 | 0.439 | 203.3 (min 202.7 at ep 5) |
+| cnn_a epoch 7 (with pairs) | 0.289 | 0.540 | 196.9 (min 195.4 at ep 4) |
+**The pair channel (fragment–fragment differences through the stack shared with the neutral losses) is worth +0.017 / +0.10** — about 40 % of cnn_a's hxqry gain over rev2_w. Without pairs the CNN still beats rev2_w (0.254 / 0.299) on both sets.
+cnn_t2 (equal wall-clock, 2 epochs) runs after cnn_np (~19:00). Both land in `C:\prog\casmi\cnn\SUMMARY.txt`.
 ### 5.3 night runs (night_cnn.bat, `cnn_night` pid 1260 launched 11:44, waits for the day job's "all done", ≤5 CPU threads; GPU shared by 3 agents → steps 3–5× slower than alone: cnn_f16 ~270 ms/step ≈ 4 h, the others ≈ 3 h each): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
 
-## 6. Resume steps
-1. `ssh ... "type C:\prog\casmi\cnn\progress.txt"`; job alive: `powershell -c "Get-Process -Id (Get-Content C:\prog\casmi\night\cnn_day.pid)"`; stop only it: `taskkill /pid <pid> /t /f`.
-2. Read `C:\prog\casmi\cnn\SUMMARY.txt` (training curves, calibration, eval tables). Fill §5.
-3. Rebuild after source changes: copy cpp/cnn/* and cpp/rev/{backend.hpp,parallel.hpp,rev2_model.hpp} to `C:\prog\casmi\fwdmodel\cnn\`, run `build.bat` there.
-4. Single eval: `C:\prog\casmi\fwdmodel\cnn\cnn_win_eval.exe dir=C:\prog\casmi qry=hcqry win=w_hcqry models=rev2_w.bin:v4k,cnn_a.bin:v4k ens=1 threads=6`.
+## 6. Resume steps (next session)
+Jobs on the build machine (both detached via launch.ps1; own PIDs only):
+- `cnn_day` pid 1628 (`day_cnn.bat`): still running cnn_np, then cnn_t2, then writes `C:\prog\casmi\cnn\SUMMARY.txt` and "all done" in `progress.txt` (expected ~19:00 with the GPU shared). It uses 6 threads (launched before the ≤5 rule; everything after uses 5).
+- `cnn_night` pid 1260 (`night_cnn.bat`): waits for that "all done" (max 10 h), then cnn_f16 (fp3c16k, ~4 h), cnn_awd (wd 0.05 / drop 0.5), cnn_a33 (seed 33), each with ensembles vs rev3_fp3c16k_big (no FPNet); writes `C:\prog\casmi\cnn\NIGHT_SUMMARY.txt` and "all done" in `night_progress.txt`. Trainer = cnn_calib.exe (bounded Platt).
+1. Status: `ssh ... "type C:\prog\casmi\cnn\progress.txt & type C:\prog\casmi\cnn\night_progress.txt"`; alive: `powershell -c "Get-Process -Id 1628,1260"`; stop only these: `taskkill /pid <pid> /t /f`.
+2. Read SUMMARY.txt (cnn_np final, cnn_t2) and NIGHT_SUMMARY.txt; fill 5.2b / 5.3. Recalibrate day models if the cal variant is needed: `C:\prog\casmi\fwdmodel\cnn\cnn_calib.exe calib model=cnn_np.bin lib=wlib fp=v4k hold=20 out=cnn_np_c.bin threads=5` (cnn_a's is cnn_a_c.bin).
+3. Choose the production reverse model: cnn_a (v4k) or cnn_f16 (fp3c16k), ensembled 1:1 or 0.5:1 with rev3_fp3c16k_big (best so far 0.354 / 0.559–0.576, no FPNet). Before believing hxqry +0.25: a second clean ordinary-molecule holdout (make_holdout + a library without it), then the full pipeline (PubChem window channel of phys_v30pc with z_window(CNN tanimoto) in place of REV2) on hcqry/hxqry, then the LB.
+4. Kaggle: CPU inference 30 ms/spectrum (4 threads, plain-loop GEMM) for the 65.6M-param model; file 262 MB float32 (fp16 storage if dataset size matters). The same headers compile with g++ (CPU path) for the notebook's C++.
+5. Next ideas: early stopping (cnn_a's held-out loss is lowest at epoch 4–6 while window MRR still rose to epoch 12 — decide which to follow), dilated convs / larger receptive field (now ~60 Da at the 1 Da level; long losses such as 162 are seen via position and the pair/NL axes), larger pairK, fp3 bits (cnn_f16).
+6. Rebuild after source changes: copy cpp/cnn/* and cpp/rev/{backend.hpp,parallel.hpp,rev2_model.hpp} to `C:\prog\casmi\fwdmodel\cnn\`, run `build.bat` there — not while a job runs cnn_train.exe/cnn_calib.exe (link fails on the locked exe; build under another name instead).
+7. Single eval: `C:\prog\casmi\fwdmodel\cnn\cnn_win_eval.exe dir=C:\prog\casmi qry=hcqry win=w_hcqry models=rev3_fp3c16k_big.bin:fp3c16k,cnn_a.bin:v4k "ensw=1,1;0.5,1" threads=5`.
