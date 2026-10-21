@@ -38,3 +38,26 @@ meta.update(id="yomeiotani/casmi26-cpp-library-search-v33", title="CASMI26 cpp l
             code_file="casmi_match_v33.ipynb")
 (nbd / "kernel-metadata-v33.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 print("wrote", nbd / "casmi_match_v33.ipynb", "and kernel-metadata-v33.json; option", BOLTZ)
+
+# v33nofp: the same without the public FPNet weights (host ruling 2026-10-21: no FPNet in the final two
+# submissions). As casmi_match_v27c_noFPNet.ipynb: the FPNet stage still compiles phys_v33pc, FP_ARGS = ["", "0"].
+src = "".join(nb["cells"][6]["source"])
+a = src.index("    FPNET_SRC = RDKIT_MIN.parent")
+b = src.index("    # phys_fp = phys_ana + optional")
+block = "".join("    " + l if l.strip() else l for l in src[a:b].splitlines(keepends=True))
+src = src[:a] + "    if USE_FPNET:\n" + block + src[b:]
+old = '    FP_ARGS = ["fpnet_test.txt", "1.0"]\n'
+assert src.count(old) == 1
+src = src.replace(old, '    FP_ARGS = ["fpnet_test.txt", "1.0"] if USE_FPNET else ["", "0"]  # v33nofp: no FPNet term\n')
+old = "FP_ARGS = []\ntry:\n"
+assert src.count(old) == 1
+src = src.replace(old, "# v33nofp: the public FPNet weights (no released training code) are not used (host ruling);\n"
+                       "# the stage still compiles phys_v33pc. The holdout numbers of pc5_STATUS.md are FPNet-free too.\n"
+                       "USE_FPNET = False\nFP_ARGS = []\ntry:\n", 1)
+compile(src, "cell6", "exec")
+nb["cells"][6]["source"] = src.splitlines(keepends=True)
+(nbd / "casmi_match_v33nofp.ipynb").write_text(json.dumps(nb, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+meta.update(id="yomeiotani/casmi26-cpp-library-search-v33nofp", title="CASMI26 cpp library search v33nofp",
+            code_file="casmi_match_v33nofp.ipynb")
+(nbd / "kernel-metadata-v33nofp.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+print("wrote", nbd / "casmi_match_v33nofp.ipynb", "and kernel-metadata-v33nofp.json")
