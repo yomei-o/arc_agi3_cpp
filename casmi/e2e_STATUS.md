@@ -86,7 +86,14 @@ was found and fixed in a copy.
 - **Fix 1** `notebook/casmi_match_v33nofp_fix.ipynb` (made by `py/e2e_make_fix_nb.py`): `fast_gpp` compiles each source
   once into objects with 4 jobs (same flags) and reuses them for the three executables. Same sources and flags, so
   the same program. Build machine: 96 sources in 113 s with 4 jobs, the next two executables 14 s and 32 s.
-  E2E check of the fix notebook: (see below).
+  E2E check of the fix notebook (`work_fix\`, run_fix.log, 884 s total vs 915 s with the e2e harness's own
+  parallel compile): pool_candidates.csv **byte-identical** to the unfixed run, submission hc 0.5576 / hx 0.8613
+  (same). On Kaggle (4 CPUs) this should cut the ~61 min of compiles to roughly 10–15 min.
+- Side finding (j): **match.cpp's library list is not deterministic in tie order**. Two runs on the same data gave
+  different direct_submission.csv files (same MRR 0.0475 / 0.4131): `best` is an `unordered_map` reused per thread
+  (`clear()` keeps the bucket count, so iteration order depends on which molecules the thread did before) and
+  `std::sort` is not stable on equal scores. Affects only library fills of short rows (submission differed in ~150
+  bytes, same MRR). Fix if wanted: sort by (score desc, molecule index asc).
 - (b), (c) and (e) are not worth a submission (0 impact on this test); if ever touched: shift −17.003289; store adduct and
   instrument in separate fields (or tag = (a+1)·16 + (i+1)); dedup step = v28's cell.
 
