@@ -130,14 +130,15 @@ If R (answer outside the pool) is ~0.7 of the hidden set (RESUME 10-19 estimate)
 | set (plain -> inserted) | attpool 0 | attpool 1 | attpool 2 | attpool 3 |
 |---|---|---|---|---|
 | hcqry (answer in pool) | 0.5328 -> 0.5231 | **0.5425 -> 0.5328** (+0.010) | 0.5416 -> 0.5319 | 0.5321 -> 0.5221 |
-| hasqry (sibling) | 0.8393 -> 0.8387 | 0.8396 -> 0.8391 | AP2_HAS | 0.8434 -> 0.8427 |
-| hcqry rm=1 | 0.1514 -> 0.2360 | **0.1595 -> 0.2435** (+0.008; generated candidates) | AP2_RM | |
+| hasqry (sibling) | 0.8393 -> 0.8387 | 0.8396 -> 0.8391 | **0.8467 -> 0.8462** | 0.8434 -> 0.8427 |
+| hcqry rm=1 | 0.1514 -> 0.2360 | **0.1595 -> 0.2435** (+0.008; generated candidates) | 0.1599 -> 0.2435 | |
 
-**Best FPNet-free config so far: `attn=1,pcrank=rev,attpool=1`** vs v32 (pcfp, fused): hcqry rm=1 0.2173 -> **0.2435 (+0.026)**,
-hcqry 0.5256 -> **0.5328 (+0.007)**, hasqry 0.8362 -> **0.8391 (+0.003)**; holdout2 mix 0.6563 -> **0.6628 (+0.0065)** — positive
-on all three components.
+**Best FPNet-free config: `attn=1,pcrank=rev,attpool=2`** vs v32 (pcfp, fused): hcqry rm=1 0.2173 -> **0.2435 (+0.026)**,
+hcqry 0.5256 -> **0.5319 (+0.006)**, hasqry 0.8362 -> **0.8462 (+0.010)**; holdout2 mix (0.5 has + 0.42 hc + 0.08 hc rm)
+0.6563 -> **0.6660 (+0.0097)** — positive on all three components (attpool=1: 0.2435 / 0.5328 / 0.8391, mix 0.6628).
+Runs `attn\pc\hc34rp2_1, hc34rp2_0, has34rp2_0`.
 The pool fusion's REV2 term has weight 1; attention at weight 1 adds +0.010 on the denovo-with-answer-in-pool set,
-weight 3 overshoots there (-0.001 vs 0) but helps the sibling set (+0.004).
+weight 2 is the best compromise (has +0.007 over weight 1, hc -0.001), weight 3 overshoots on hc.
 
 Timing (thread-s, 2-thread runs while two other agents shared the machine — noisy): enumeration+analog stage
 hc 1136 s (v32) vs 1600 s (v34, includes the retrieval), PubChem stage 2.3 -> 2.9-3.7 s/query. attn_eval alone does the
