@@ -1,0 +1,36 @@
+1423 scans
+
+class          n  barrier mean  median  reaction  plateau  observed
+glycosidic    27          25.4    24.0      21.5      33%       83%
+acyl         179          52.3    32.5      26.5      34%       61%
+C-het        584          47.9    47.3      31.7      39%       42%
+C-C          465          89.7    93.2      77.3      63%       31%
+aryl-C       168         105.6   114.0      93.5      71%       71%
+
+lower barrier -> observed?  AUC of (-barrier) for observed vs not (0.5 = no information)
+  within glycosidic  obs   5 / not   1  AUC 0.0
+  within acyl        obs  53 / not  34  AUC 0.419
+  within C-het       obs 131 / not 183  AUC 0.533
+  within C-C         obs  71 / not 155  AUC 0.669
+  within aryl-C      obs  75 / not  30  AUC 0.504
+  pooled (class differences included)  AUC 0.530
+labelled cuts 738, observed 335
+baseline class + size bin: ll/cut -0.5990  AUC 0.737
+  + barrier                    gain  -0.75 mnat/cut (split-to-split sd 1.24)  AUC 0.737
+  + reaction energy            gain  -2.07 mnat/cut (split-to-split sd 1.45)  AUC 0.735
+  + barrier + reaction         gain  -3.06 mnat/cut (split-to-split sd 2.38)  AUC 0.735
+  + barrier SHUFFLED in class  gain  -1.28 mnat/cut (split-to-split sd 0.93)  AUC 0.735
+labelled aryl-C bonds 91 (observed 66)
+  direct heterolysis       AUC 0.615  95% CI [0.487, 0.746]   median barrier obs  126.6 / not  131.2
+  ipso route total         AUC 0.640  95% CI [0.512, 0.764]   median barrier obs   51.3 / not   65.0
+  ipso: proton move only   AUC 0.613  95% CI [0.464, 0.742]   median barrier obs   22.7 / not   28.7
+  ipso: cleavage only      AUC 0.535  95% CI [0.392, 0.684]   median barrier obs   27.6 / not   37.5
+132 aryl-C bonds on 6-rings
+  ortho/para donors 0: n  59  proton-move cost median   31.5  total   51.7
+  ortho/para donors 1: n  53  proton-move cost median   27.1  total   54.3
+  ortho/para donors 2: n  12  proton-move cost median   14.7  total   61.9
+  ortho/para donors 3: n   8  proton-move cost median   18.1  total   55.5
+  meta donors       0: n 100  proton-move cost median   28.4  total   58.1
+  meta donors       1: n  25  proton-move cost median   16.7  total   40.6
+  meta donors       2: n   7  proton-move cost median   31.8  total   54.5
+linear fit: proton-move cost = 29.1 -4.1(+-1.4) * n_ortho/para -3.1(+-2.1) * n_meta  [kcal/mol]
