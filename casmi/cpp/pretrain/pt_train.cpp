@@ -12,6 +12,7 @@
 //     attn_eval), keeps the top nbr library molecules per variant:
 //       slot 0 = global (precursor) token  Y_g,  1 = mean of peak tokens Y_m,  2 = (cos_g + cos_m)/2
 //     -> <dir>/ptnbr_<qry>_<tag>.bin in attn_eval's neighbour-cache format (4 slots, slot 3 empty).
+//     center=1 (default): subtract the library mean embedding (100k-spectrum sample) before normalising.
 //   pt_train embed model=<stem>.bin set=<stem of spectra> out=<file> [var=0] : fp16 L2-normalised embeddings
 //     (one row per spectrum) for shipping precomputed library embeddings (Kaggle CPU inference = query side only).
 //   pt_train export model=<stem>.bin lib=wlib fp=fp3c16k HH=2048 out=<file>  : TFM1 file with the pretrained
@@ -472,6 +473,10 @@ int train() {
 
 // ------------------------------------------------------------------ embeddings
 // unmasked forward of a list of spectra -> L2-normalised embeddings per variant (0 global, 1 mean)
+// optional centring (subtract the library mean embedding before L2 normalisation: the raw embeddings are
+// anisotropic, top-1 cosines ~0.96-0.99 in the pilot) and raw output (for computing that mean)
+std::vector<float> gCenter[2];
+bool gRaw = false;
 void embedSpectra(mpm::Model& m, const Store& st, const std::vector<int>& specs, std::vector<float>& eg, std::vector<float>& em,
                   int B, const std::vector<int>& npEff) {
   const int d = m.c.d;
@@ -494,11 +499,14 @@ void embedSpectra(mpm::Model& m, const Store& st, const std::vector<int>& specs,
     for (size_t i = s0; i < s1; ++i) {
       const real* e = E.data() + (i - s0) * 2 * d;
       for (int v = 0; v < 2; ++v) {
-        double n2 = 0;
-        for (int j = 0; j < d; ++j) n2 += double(e[v * d + j]) * double(e[v * d + j]);
-        float inv = float(1.0 / std::sqrt(n2 + 1e-12));
         float* o = (v == 0 ? eg.data() : em.data()) + size_t(ord[i]) * d;
-        for (int j = 0; j < d; ++j) o[j] = float(e[v * d + j]) * inv;
+        const bool cen = int(gCenter[v].size()) == d;
+        for (int j = 0; j < d; ++j) o[j] = float(e[v * d + j]) - (cen ? gCenter[v][j] : 0.f);
+        if (gRaw) continue;
+        double n2 = 0;
+        for (int j = 0; j < d; ++j) n2 += double(o[j]) * double(o[j]);
+        float inv = float(1.0 / std::sqrt(n2 + 1e-12));
+        for (int j = 0; j < d; ++j) o[j] *= inv;
       }
     }
   }
@@ -526,6 +534,28 @@ int nbrMode() {
   m.reserve(B, m.c.maxPeaks + 1);
   auto t0 = std::chrono::steady_clock::now();
   auto secs = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+  Store L = loadSpectra(dir, lib);
+  auto lnp = peakCounts(L, m.c.maxPeaks);
+  if (geti("center", 1)) {
+    std::vector<int> smp;
+    const size_t stepS = std::max<size_t>(1, L.head.size() / 100000);
+    for (size_t s = 0; s < L.head.size(); s += stepS) if (L.head[s].n > 0) smp.push_back(int(s));
+    std::vector<float> rg, rm;
+    gRaw = true;
+    embedSpectra(m, L, smp, rg, rm, B, lnp);
+    gRaw = false;
+    for (int v = 0; v < 2; ++v) {
+      const auto& r = v == 0 ? rg : rm;
+      gCenter[v].assign(d, 0.f);
+      std::vector<double> acc(d, 0.0);
+      for (size_t i = 0; i < smp.size(); ++i) for (int j = 0; j < d; ++j) acc[j] += r[i * d + j];
+      double nc = 0, nr = 0;
+      for (int j = 0; j < d; ++j) { gCenter[v][j] = float(acc[j] / smp.size()); nc += acc[j] / smp.size() * acc[j] / smp.size(); }
+      for (size_t i = 0; i < smp.size(); ++i) for (int j = 0; j < d; ++j) nr += double(r[i * d + j]) * r[i * d + j];
+      std::printf("centring %s: library mean over %zu spectra, |mean|^2 / mean |e|^2 = %.3f\n", v == 0 ? "g" : "m", smp.size(),
+                  nc / (nr / smp.size()));
+    }
+  }
   // queries of all sets
   std::vector<std::string> qn;
   { std::stringstream ss(get("qrys", "hcqry,hxqry,haqry")); std::string t; while (std::getline(ss, t, ',')) if (!t.empty()) qn.push_back(t); }
@@ -546,7 +576,6 @@ int nbrMode() {
   }
   const int nq = int(qSet.size());
   std::printf("query spectra %d (%.0fs)\n", nq, secs());
-  Store L = loadSpectra(dir, lib);
   const int nLM = int(L.name.size());
   // best[v][set][qmol][libmol] dense max (float), v = 0 g, 1 m, 2 gm
   std::vector<std::vector<std::vector<float>>> best(3);
@@ -568,7 +597,6 @@ int nbrMode() {
   std::vector<int> lspec;
   for (size_t s = 0; s < L.head.size(); ++s) if (L.head[s].n > 0 && L.head[s].mol >= 0) lspec.push_back(int(s));
   if (libMax > 0 && int(lspec.size()) > libMax) lspec.resize(libMax);
-  auto lnp = peakCounts(L, m.c.maxPeaks);
   std::vector<float> eg, em;
   std::vector<real> SG(size_t(nq) * LB), SM(size_t(nq) * LB), hl;
   for (size_t c0 = 0; c0 < lspec.size(); c0 += LB) {
