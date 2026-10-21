@@ -89,7 +89,13 @@ is worse than cnn alone everywhere → **do not add fp3 to the pool fusion**. (4
 (physics is not in the dump; it is already the z(phys) base term).
 
 ### Shuffled-query control (cnnshuf=7) and C++ check of w 2
-(pending at write time — see "Resume")
+Launched 17:46 (a first launch at 17:22 failed on a shell-quoting slip, nothing ran), detached, 2 threads each:
+`pool36_shufx` (hxqry, cnnshuf=7, cnnpool 0 -> `v36\out\p36x_0_shuf_cf.txt`), `pool36_shufb` (hbqry -> `p36b_0_shuf_cf.txt`),
+`pool36_chkb` (hbqry with cnnpool=2 in C++ -> `v36\out\p36b_cnn2_ins.csv`; ~21 min each, expected ~18:07).
+To finish: copy `p36x_0_shuf_cf.txt`, `p36b_0_shuf_cf.txt` next to the other dumps and re-run pool36.py (rows
+"cnn w SHUF-query control"); for the C++ check compare the simulated final list at cnn 2 with `p36b_cnn2_ins.csv`
+(expected MRR 0.8023 final / 0.8058 plain, `findstr MRR v36\out\p36b_cnn2.log`).
+(results, if they arrived before hand-back, below)
 
 ## Recommendation
 - For a timsTOF test the measured pool-ranking gain of **+2 z(CNN)** (cnn_a_c, CPU ~30–85 ms/spectrum) is +0.011 to
