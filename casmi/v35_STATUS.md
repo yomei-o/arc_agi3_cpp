@@ -1,6 +1,6 @@
 # v35 — Boltzmann merge (v33) + attention engine (v34), FPNet-free
 
-2026-10-21. v35 = phys_v35pc with `pcfp=<fp3 model>,attn=1,pcrank=rev,attpool=2,alloc=boltz,bT1=2,bT2=0.5,bpi=0.2,ba=0.5`
+2026-10-21 (finished 15:20, nothing running on the build machine). v35 = phys_v35pc with `pcfp=<fp3 model>,attn=1,pcrank=rev,attpool=2,alloc=boltz,bT1=2,bT2=0.5,bpi=0.2,ba=0.5`
 (+ the fixed v30 options pcrev=tan, ppop 0.15 / ppgate 0.9). No FPNet anywhere. Nothing uploaded / pushed / submitted.
 
 ## Code
@@ -70,7 +70,16 @@ mix +0.0031 / +0.0029, hc rm1 +0.031 / +0.011, ha rm1 +0.007 / +0.004, hcqry +0.
 Gate (sibling / xinstr) passed vs both. Most of v35's gain over v33 on the sibling/xinstr sets comes from v34's
 attention (main-list attpool + PubChem list), not the merge; the merge adds +0.021 on hc rm1 over v34's slots.
 
-FINAL_CPP_PLACEHOLDER
+### Full pipeline, phys_v35pc C++ with the chosen config (`cpp/v35/laneF*.bat`, runs `v35\out\v35_0, v35_1, v35s_0, v35x_0`)
+| set | v33 | v34 (attpool 2) | **v35** |
+|---|---|---|---|
+| hcqry | 0.5250 | 0.5319 | **0.5357** (plain 0.5416) |
+| hcqry rm=1 | 0.2467 | 0.2435 | **0.2648** (plain 0.1599; 228/400 in top 25) |
+| hasqry | 0.8390 | 0.8462 | **0.8457** (plain 0.8467) |
+| hxqry | 0.8613 | 0.8730 | **0.8731** |
+| mixture (0.5 has + 0.42 hc + 0.08 hc rm1) | 0.6597 | 0.6660 | **0.6691** |
+The written lists equal the simulator's for 400/400 queries on all four sets (0 differences), so the bootstrap table
+above is the C++ result. Log: `pubchem v33: alloc=boltz (replaces slots/promotion): T1 2 T2 0.5 pi 0.2 ba 0.5 K1 60`.
 
 ## Kaggle readiness (nothing uploaded)
 - Staged on the build machine `C:\prog\casmi\v35\ds_add\` (`cpp/v35/kcheck35.bat`):
