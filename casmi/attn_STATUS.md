@@ -126,6 +126,19 @@ On the answer-in-pool sets the cost is <= 0.003 (stronger PubChem picks occasion
 If R (answer outside the pool) is ~0.7 of the hidden set (RESUME 10-19 estimate), the expected LB effect is
 ~+0.01 (0.7 x 0.019 x LB/holdout ratio ~0.5-1), larger if the insertion rule is re-tuned to the new score scale.
 
+**attpool** (attention also in the main pool fusion: + w z(att) over pool + generated candidates; pcrank=rev, attn=1):
+| set (plain -> inserted) | attpool 0 | attpool 1 | attpool 2 | attpool 3 |
+|---|---|---|---|---|
+| hcqry (answer in pool) | 0.5328 -> 0.5231 | **0.5425 -> 0.5328** (+0.010) | 0.5416 -> 0.5319 | 0.5321 -> 0.5221 |
+| hasqry (sibling) | 0.8393 -> 0.8387 | 0.8396 -> 0.8391 | AP2_HAS | 0.8434 -> 0.8427 |
+| hcqry rm=1 | 0.1514 -> 0.2360 | **0.1595 -> 0.2435** (+0.008; generated candidates) | AP2_RM | |
+
+**Best FPNet-free config so far: `attn=1,pcrank=rev,attpool=1`** vs v32 (pcfp, fused): hcqry rm=1 0.2173 -> **0.2435 (+0.026)**,
+hcqry 0.5256 -> **0.5328 (+0.007)**, hasqry 0.8362 -> **0.8391 (+0.003)**; holdout2 mix 0.6563 -> **0.6628 (+0.0065)** — positive
+on all three components.
+The pool fusion's REV2 term has weight 1; attention at weight 1 adds +0.010 on the denovo-with-answer-in-pool set,
+weight 3 overshoots there (-0.001 vs 0) but helps the sibling set (+0.004).
+
 Timing (thread-s, 2-thread runs while two other agents shared the machine — noisy): enumeration+analog stage
 hc 1136 s (v32) vs 1600 s (v34, includes the retrieval), PubChem stage 2.3 -> 2.9-3.7 s/query. attn_eval alone does the
 retrieval for 400 queries in ~25 s on 6 threads (~0.4 thread-s/query) -> on Kaggle's 4 threads ~+1-3 min.
