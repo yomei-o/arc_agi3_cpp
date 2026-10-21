@@ -66,7 +66,33 @@
 ## 5. 評価（holdout で安全 = wlib モデル）
 (a) 窓内 MRR（`cpp/rev3/win_eval.cpp` に `<x>_mol.bin`（fpnet_ggml の分子ロジット）を読む経路を追加）: 窓候補のビット `C:\prog\casmi\w_{hcqry,hxqry}_fp10226.bin`（fp10226.py、計算中）。
 (b) プールの順位: 本番の融合 + 1.0 z(fpnet)、hcqry/hasqry/hxqry、FPNet なしと比較（`bat_h2/h2_fpown.bat`、準備中）。
-結果: （未）
+### 学習の経過（wlib、hold 20 の 2 万スペクトル）
+| エポック | val BCE/スペクトル | micro-F1 (P / R) |
+|---|---|---|
+| 1 | 1636.7 | 0.596 (0.765 / 0.488) |
+| 2 | 1554.7 | 0.634 (0.775 / 0.536) |
+速度: 1 エポック 2,269 s（38 分、B 128、GPU 共有中）。
+
+### (a) 窓内 MRR（`cpp/fpown/eval_win.bat`、PubChem ±10 ppm 窓の全候補、正解が窓にあるクエリで MRR_in）
+fpown は notebook と同じ fpnet_ggml で f16 ファイルから分子ロジットを出し、"logit" = fpnet_pool と同じ cand_fp·logits。基準 rev2_w（wlib、clean、fp3_STATUS）。
+| holdout | モデル | logit | tanimoto | z(tanimoto)+0.15 pop | 対照（ラベル置換）logit |
+|---|---|---|---|---|---|
+| hcqry（窓 5,470） | rev2_w | 0.173 | 0.254 | 0.357 | 0.014 |
+| | fpown ep1 | 0.238 | 0.265 | 0.342 | 0.032 |
+| | **fpown ep2** | **0.296** | **0.296** | **0.368** | 0.028 |
+| hxqry（窓 12,447） | rev2_w | 0.090（cal 0.229） | 0.299 | 0.300 | 0.000 |
+| | **fpown ep2** | **0.376** | **0.407** | 0.392 | 0.000 |
+→ 2 エポックで既に自前 REV2（rev2_w）を全変種で上回る。特に fpnet_pool の採点形（logit 和）で hcqry 0.17 → 0.30、hxqry 0.09 → 0.38。
+
+### (b) プールの順位（本番融合の holdout 版 + 1.0 z(fpnet)、`cpp/fpown/pool_eval.bat` → `bat_h2/h2_fpown.bat`）
+融合 = v30 の holdout 版（`phys_v30pc`、pcrev=tan、REV2 = rev2_w、MLP = fwd_mlp_rank_ylib、ライブラリ wlib（hxqry は zlib = xinstr））。公開 FPNet の項だけ外したもの = 基準。
+数字は PubChem 挿入後の本番リスト（_ins.csv）を mrr.py で採点（括弧内は挿入前）。対の差の SE は ~0.005–0.01。
+| holdout | FPNet なし（基準） | + 1.0 z(fpown ep2) | 差 |
+|---|---|---|---|
+| hcqry | 0.524 (0.531) | **0.537** (0.544) | **+0.013** |
+| hasqry | 0.836 (0.838) | 0.837 (0.839) | +0.001 |
+| hxqry | 0.857 (0.858) | **0.868** (0.870) | **+0.011** |
+（公開 FPNet の LB 寄与は約 +0.02。公開重みは train 全体で学習しているのでどの holdout でも漏れており、同じ物差しでは比べられない。）
 
 ## notebook での使い方（予定）
 notebook の FPNet 段の重みパス（FP_W）を `fpnet_full1_f16.bin` から `fpnet_own_f16.bin` に替えるだけ（同じ fpnet_ggml / fpnet_pool / pool730_fp10226.bin）。
