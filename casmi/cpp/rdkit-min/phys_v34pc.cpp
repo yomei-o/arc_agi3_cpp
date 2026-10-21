@@ -12,6 +12,7 @@
 //                 att = continuous Tanimoto of p vs its fp3 bits (as pcfp), and its pcfp score is replaced
 //                 by z_win(fp3) + attw * z_win(att) (z over the query's PubChem window).
 //   attk=10 attT=0.1 attw=1 attsim=3 attpk=40 (peaks per spectrum) atttol=0.01 (Da) attmp=4
+//   attpool=w    also add w * z(att) over the query's pool + generated candidates to the main fusion (default 0).
 //   Absent attn (or attn=0) = phys_v32pc output.
 //
 // phys_v32pc: phys_v30pc + an own fp3 reverse model for the PubChem window (2026-10-20, pc4_STATUS.md):
@@ -920,6 +921,8 @@ int main(int argc, char** argv) {
   const int attK = std::max(1, optI("attk", 10)), attPkN = optI("attpk", 40), attMp = optI("attmp", 4),
             attSim = std::min(3, std::max(0, optI("attsim", 3)));
   const float attT = float(optF("attT", 0.1)), attW = float(optF("attw", 1.0)), attTol = float(optF("atttol", 0.01));
+  // attpool=w: also add w * z(att) (z over the query's pool + generated candidates) to the main fusion (default 0)
+  const float attPoolW = float(optF("attpool", 0.0));
   // v28pc: pool popularity (ppop=w): among the top ppn of the final list, the pool
   // candidates' places are re-filled in the order z(final score) + w * pop
   // (z over those pool candidates); generated candidates keep their places
@@ -2389,8 +2392,12 @@ int main(int argc, char** argv) {
         std::vector<float> zm = haveMlp ? zscore(Q[qi].mlpCos) : std::vector<float>(zp.size(), 0.f);
         std::vector<float> zr = haveRev ? zscore(Q[qi].revLL) : std::vector<float>(zp.size(), 0.f);
         std::vector<float> f(zp.size());
+        // v34pc attpool: attention score of the pool candidates in the main fusion
+        const bool qAp = attPoolW != 0.f && Q[qi].attPc.size() == zp.size();
+        std::vector<float> za = qAp ? zscore(Q[qi].attPc) : std::vector<float>();
         for (size_t i = 0; i < f.size(); ++i) {
           f[i] = w < 0.f ? zm[i] : zp[i] + w * zm[i] + wr * zr[i];
+          if (qAp) f[i] += attPoolW * za[i];
           // a sharp power: only a near-identical library spectrum (the same
           // molecule) should count - a linear term promotes every analog
           // whose spectrum is merely similar, which costs the de novo case

@@ -84,7 +84,62 @@ costs 0.02 there, but helps on hx (+0.02) and with popularity on hc (+0.005). Ca
 its analog series; if the hidden set's molecules come from series absent in train, the gain shrinks toward k=1-type values.
 
 ## Integration (step 2): `cpp/rdkit-min/phys_v34pc.cpp`
-PHYS_SECTION
+Step 1 passed by far (+0.13 / +0.31 / +0.14 window MRR on hc / hx / ha), so the engine was added to a copy of
+phys_v32pc. Options (argv[24]): `attn=1` (needs pc=1, pcfp and a library), `attk=10 attT=0.1 attw=1 attsim=3
+attpk=40 atttol=0.01 attmp=4` (defaults = the window-yardstick best config). Code = attn_eval's v2 retrieval, ported:
+- after the library's own indexes, a second inverted index (fragment + loss postings of attPrep peaks, ~57M each,
+  16 B/posting -> ~1.8 GB; built in ~5 s); per-thread accumulators 8 x n_lib_spectra floats (~80 MB/thread).
+- per query, after the existing analog search: retrieval -> top attk library molecules -> softmax -> p over the
+  pcfp model's fp3 vocabulary (library SMILES -> fp3::features -> vocabulary index, deduplicated bits).
+- `fp3Of` computes the attention Tanimoto in the same pass (`lastAtt`); window candidates (W.att) and pool candidates
+  (q.attPc) get it; before the PubChem list is built, every pcfp score (window and pool, the latter used for relz and
+  the fused list's z(rev)) becomes `z_win(fp3) + attw * z_win(att)` with the window's mean / sd. Queries without
+  neighbours keep the v32 score. pcfptop>0 is handled (non-top candidates get min - 1e-6 for both).
+- **Default = phys_v32pc, verified**: v34 without attn on hcqry rm=1 vs pc4\hc32_1: `fc /b` no differences for both the plain
+  and the inserted CSV (`attn\pc\eq_*.txt`; run `hc34off_1`).
+- Build: `cpp/attn/build_v34.bat` (MSVC, `C:\prog\casmi\attn\v34\`), runs `cpp/attn/run34.bat` (= bat_pc4/run4.bat with the
+  same fixed v28b options; ylib, fwd_mlp_rank_ylib, rev2_y, pcfp = rev3_fp3c16k_big (wlib), no FPNet), outputs
+  `C:\prog\casmi\attn\pc\<tag>.*`.
+- Kaggle staging (NOT uploaded): `C:\prog\casmi\attn\ds_add\rdkit-min\phys_v34pc.cpp` + `rdkit-min\rev\fp3_v32.h` (same file as
+  v32); `g++ -std=c++20 -fsyntax-only` with the Kaggle include layout: **rc 0** (`cpp/attn/kcheck34.bat`, log
+  `C:\prog\casmi\attn\kcheck.log`). No new data files: the engine uses the notebook's library (train) and the v32 fp3 model.
+  Notebook change for a v34: `srcs` phys_v34pc.cpp and `,attn=1` (+ `,pcrank=rev` if adopted) in the options string.
+
+### Final-list results (MRR@25 by mrr.py; FPNet-free; v32 = pc4 numbers)
+| set | v32 (pcfp, pcrank=fused) | **v34 attn=1, pcrank=fused** | **v34 attn=1, pcrank=rev** |
+|---|---|---|---|
+| hcqry rm=1 (answer only via PubChem/generation), inserted | 0.2173 | 0.2298 (+0.0125) | **0.2360 (+0.019)** |
+| hcqry rm=1, truth among the 50 listed | 159 | 168 | 168 |
+| hcqry rm=1, PubChem-list MRR@25 / top1 / top10 (pc_det_rank.py) | 0.296 / 101 / 147 (rev order: 0.281 / 92 / 146) | 0.316 / 108 / 158 | **0.345 / 125 / 160** |
+| hcqry (answer in pool), inserted | 0.5256 | 0.5243 (-0.001) | 0.5231 (-0.003) |
+| hasqry (sibling), inserted | 0.8362 | 0.8374 (+0.001) | 0.8387 (+0.003) |
+| holdout2 mix 0.5 has + 0.42 hc + 0.08 hc rm | 0.6563 | 0.6573 (+0.001) | 0.6580 (+0.002) |
+Runs: `attn\pc\hc34_1, hc34_0, has34_0` (fused), `hc34r_1, hc34r_0, has34r_0` (rev). Plain (no insertion) is identical
+by construction (0.1514 / 0.5328 / 0.8393).
+
+Reading: the window gain (+0.13 MRR_in on hcqry) shows up in the PubChem list (rev order 0.281 -> 0.345, +0.064; the
+list is the top 300 by z(score)+0.15 pop, then the top 50) but the final list moves only +0.012 to +0.019 on the
+answer-removed set, because insertion is still the gated fixed-slot rule (slots 4:8:12:16:20 / 2:4:6:8:10, promotion
+at relz>3 or S>6&pop>=5, thresholds tuned on REV2 scores). With attention the rev-ordered list is better than the
+hand-fused order (phys/MLP/analog re-rank costs 0.03 list MRR) -> pcrank=rev is preferable with attn.
+On the answer-in-pool sets the cost is <= 0.003 (stronger PubChem picks occasionally displace a pool answer).
+If R (answer outside the pool) is ~0.7 of the hidden set (RESUME 10-19 estimate), the expected LB effect is
+~+0.01 (0.7 x 0.019 x LB/holdout ratio ~0.5-1), larger if the insertion rule is re-tuned to the new score scale.
+
+Timing (thread-s, 2-thread runs while two other agents shared the machine — noisy): enumeration+analog stage
+hc 1136 s (v32) vs 1600 s (v34, includes the retrieval), PubChem stage 2.3 -> 2.9-3.7 s/query. attn_eval alone does the
+retrieval for 400 queries in ~25 s on 6 threads (~0.4 thread-s/query) -> on Kaggle's 4 threads ~+1-3 min.
+Memory: +~1.8 GB index + ~80 MB per thread.
 
 ## Resume
-RESUME_SECTION
+1. Window yardstick: `ssh ... "C:\prog\casmi\attn\run.bat <qry> <tag> \"mpen=4\" [\"notwin=1\"] [\"diag=1\"]"` (qry = hcqry |
+   hxqry | haqry; haqry window bits w_haqry_v4k / _fp3c16k were made today); `python casmi/py/attn_sum.py <log>`.
+   Neighbour caches make re-runs ~1 min.
+2. Pipeline: `ssh ... "C:\prog\casmi\attn\run34.bat <qry> ylib fwd_mlp_rank_ylib.bin rev2_y.bin <tag> 2 \",[rm=1,]pcrev=tan,pcfp=rev3_fp3c16k_big.bin,attn=1[,pcrank=rev][,attpool=w]\""`
+   -> `findstr inserted C:\prog\casmi\attn\pc\<tag>.log`; list MRR `python C:\prog\casmi\attn\pc_det_rank.py <tag>_det.txt`.
+3. Next levers: (a) re-tune the PubChem insertion (slots / relz / promotion) on the new score scale using the
+   `_det.txt` dumps (pc4 RESUME: the insertion caps the gain); (b) attpool (attention in the main pool fusion) —
+   results below if finished; (c) attw 2, attk/attT on the pipeline; (d) LB: a v34 notebook = v32 notebook with
+   phys_v34pc.cpp and `,attn=1,pcrank=rev` (user decision; nothing uploaded).
+4. Kaggle staging (not uploaded): re-run `C:\prog\casmi\attn\kcheck34.bat` after any source change (copies
+   attn\v34\phys_v34pc.cpp into attn\ds_add\rdkit-min and runs g++ -fsyntax-only).
