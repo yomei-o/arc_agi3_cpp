@@ -405,6 +405,32 @@ int main(int argc, char** argv) {
       for (int j = 0; j < nn; ++j) sc[j] = Q[qi].c[j].zf + Q[qi].c[j].za;
     });
     pr("base: z(fp3) + z(attn)", base, nullptr);
+    if (get("popgrid", "0") == "1") {
+      // the pipeline's window order adds 0.15 x popularity: does the physics / formula gain survive it?
+      auto bp = run(n, [&](int qi, int nn, std::vector<float>& sc) {
+        sc.resize(nn);
+        for (int j = 0; j < nn; ++j) sc[j] = Q[qi].c[j].zf + Q[qi].c[j].za + 0.15f * Q[qi].c[j].pop;
+      });
+      pr("base + 0.15 pop", bp, &base);
+      const int pf[] = {-1, 2 * F_PER_TOL + F_E, 1 * F_PER_TOL + F_NEXPL};
+      for (double a : {0.0, 0.25, 0.5, 0.75, 1.0})
+        for (int f : pf)
+          for (double b : {0.25, 0.5}) {
+            if (f < 0 && b != 0.25) continue;
+            if (f < 0 && a == 0.0) continue;
+            char lab[96];
+            std::snprintf(lab, sizeof lab, "base + pop + %.3g ll + %.3g %s", a, f < 0 ? 0.0 : b, f < 0 ? "-" : featName(f).c_str());
+            pr(lab, run(n, [&](int qi, int nn, std::vector<float>& sc) {
+                 std::vector<float> za, zb(nn, 0.f);
+                 zfeat(qi, nn, F_LL, 0, 1.f, za);
+                 if (f >= 0) zfeat(qi, nn, f, 0, 1.f, zb);
+                 sc.resize(nn);
+                 for (int j = 0; j < nn; ++j)
+                   sc[j] = Q[qi].c[j].zf + Q[qi].c[j].za + 0.15f * Q[qi].c[j].pop + float(a) * za[j] + float(f < 0 ? 0.0 : b) * zb[j];
+               }), &bp);
+          }
+      continue;
+    }
     pr("z(fp3) alone", run(n, [&](int qi, int nn, std::vector<float>& sc) {
          sc.resize(nn);
          for (int j = 0; j < nn; ++j) sc[j] = Q[qi].c[j].zf;
