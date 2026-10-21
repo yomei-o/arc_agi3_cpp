@@ -1,4 +1,5 @@
 @echo off
+rem (trainer = cnn_calib.exe = cnn_train.cpp with the bounded Platt fit, built as a separate exe while the day job held cnn_train.exe)
 rem night_cnn.bat : CNN follow-ups (casmi/cnn_STATUS.md). Waits for day_cnn.bat ("all done"), then sequential, 5 CPU threads + GPU.
 rem Results: C:\prog\casmi\cnn\n_*.log, night_progress.txt, NIGHT_SUMMARY.txt
 setlocal
@@ -20,7 +21,7 @@ echo day job done or timeout (%W% x 5 min) %time% >> %O%\night_progress.txt
 
 rem ---- 1. CNN A on the fp3 16k vocabulary (the MLP gained 0.254 -> 0.303 / 0.299 -> 0.270 from fp3c16k)
 if not exist %D%\cnn_f16.done (
-  %X%\cnn_train.exe train dir=%D% lib=wlib fp=fp3c16k out=cnn_f16.bin epochs=12 hold=20 threads=%T% > %O%\n_train_cnn_f16.log 2>&1 && echo ok > %D%\cnn_f16.done
+  %X%\cnn_calib.exe train dir=%D% lib=wlib fp=fp3c16k out=cnn_f16.bin epochs=12 hold=20 threads=%T% > %O%\n_train_cnn_f16.log 2>&1 && echo ok > %D%\cnn_f16.done
 )
 echo cnn_f16 done %time% >> %O%\night_progress.txt
 for %%q in (hcqry hxqry) do (
@@ -30,14 +31,14 @@ echo eval f16 done %time% >> %O%\night_progress.txt
 
 rem ---- 2. regularized CNN A (held-out loss rose after epoch 4 in cnn_a): decoupled weight decay
 if not exist %D%\cnn_awd.done (
-  %X%\cnn_train.exe train dir=%D% lib=wlib fp=v4k out=cnn_awd.bin epochs=12 hold=20 wd=0.05 drop=0.5 threads=%T% > %O%\n_train_cnn_awd.log 2>&1 && echo ok > %D%\cnn_awd.done
+  %X%\cnn_calib.exe train dir=%D% lib=wlib fp=v4k out=cnn_awd.bin epochs=12 hold=20 wd=0.05 drop=0.5 threads=%T% > %O%\n_train_cnn_awd.log 2>&1 && echo ok > %D%\cnn_awd.done
 )
 for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_awd.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k "ensw=0,1,1;1,0,1" threads=%T% > %O%\n_eval_awd_%%q.log 2>&1
 echo cnn_awd done %time% >> %O%\night_progress.txt
 
 rem ---- 3. second CNN seed: CNN+CNN ensemble vs CNN+MLP (is the ensemble gain diversity of architecture?)
 if not exist %D%\cnn_a33.done (
-  %X%\cnn_train.exe train dir=%D% lib=wlib fp=v4k out=cnn_a33.bin epochs=12 hold=20 seed=33 threads=%T% > %O%\n_train_cnn_a33.log 2>&1 && echo ok > %D%\cnn_a33.done
+  %X%\cnn_calib.exe train dir=%D% lib=wlib fp=v4k out=cnn_a33.bin epochs=12 hold=20 seed=33 threads=%T% > %O%\n_train_cnn_a33.log 2>&1 && echo ok > %D%\cnn_a33.done
 )
 for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_a33.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k "ensw=1,1,0;1,0,1;1,1,1;1,1,0.5" threads=%T% > %O%\n_eval_a33_%%q.log 2>&1
 echo cnn_a33 done %time% >> %O%\night_progress.txt

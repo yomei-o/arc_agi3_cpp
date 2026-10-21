@@ -193,7 +193,11 @@ void calibrate(Model& m, const Store& lib, const Fps& fps, int hold, int maxMols
       double det = haa * hcc - hac * hac;
       if (det <= 1e-12) break;
       double da = (hcc * ga - hac * gc) / det, dc = (haa * gc - hac * ga) / det;
-      a -= da; c -= dc;
+      // damped + bounded: the CNN's held-out logits can separate a bit perfectly, and the
+      // undamped Newton step then runs a to ~1e4 (cnn_a: mean a 7733, BCE worse after Platt)
+      double sc = std::max(1.0, std::max(std::fabs(da) / 0.5, std::fabs(dc) / 2.0));
+      da /= sc; dc /= sc;
+      a = std::min(5.0, std::max(0.05, a - da)); c = std::min(20.0, std::max(-20.0, c - dc));
       if (std::fabs(da) + std::fabs(dc) < 1e-6) break;
     }
     int tp = 0, fp = 0, fn = 0;
