@@ -95,7 +95,7 @@ Also note REV2 logit scoring is unusually poor on hxqry (0.090 vs cal 0.229), th
 Caveat: weights were chosen on these two test sets (coarse grid of 8); the 1:1 point needs no tuning.
 
 ### 5.2 remaining day runs (cnn_g, control ensemble, cnn_np, cnn_t2): `type C:\prog\casmi\cnn\SUMMARY.txt`
-### 5.3 night runs (night_cnn.bat, `cnn_night`, waits for the day job): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
+### 5.3 night runs (night_cnn.bat, `cnn_night` pid 7528 launched 11:42, waits for the day job's "all done", ≤5 CPU threads; GPU shared by 3 agents → steps 3–5× slower than alone: cnn_f16 ~270 ms/step ≈ 4 h, the others ≈ 3 h each): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
 
 ## 6. Resume steps
 1. `ssh ... "type C:\prog\casmi\cnn\progress.txt"`; job alive: `powershell -c "Get-Process -Id (Get-Content C:\prog\casmi\night\cnn_day.pid)"`; stop only it: `taskkill /pid <pid> /t /f`.

@@ -24,10 +24,7 @@ if not exist %D%\cnn_f16.done (
 )
 echo cnn_f16 done %time% >> %O%\night_progress.txt
 for %%q in (hcqry hxqry) do (
-  %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=rev3_fp3c16k_big.bin:fp3c16k,cnn_f16.bin:fp3c16k ens=1 threads=%T% > %O%\n_eval_f16_%%q.log 2>&1
-  %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=rev2_w.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k,cnn_a.bin:v4k,cnn_f16.bin:fp3c16k ens=1 threads=%T% > %O%\n_eval_all4_%%q.log 2>&1
-  %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=rev2_w.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k ens=1 threads=%T% > %O%\n_eval_mlp2_%%q.log 2>&1
-  %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=rev3_fp3c16k_big.bin:fp3c16k,cnn_a.bin:v4k ens=1 threads=%T% > %O%\n_eval_fbig_a_%%q.log 2>&1
+  %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=rev3_fp3c16k_big.bin:fp3c16k,cnn_f16.bin:fp3c16k,cnn_a.bin:v4k "ensw=1,1,0;0.5,1,0;0,1,1;1,1,1;0.5,1,1;0.5,1,0.5" threads=%T% > %O%\n_eval_f16_%%q.log 2>&1
 )
 echo eval f16 done %time% >> %O%\night_progress.txt
 
@@ -35,14 +32,14 @@ rem ---- 2. regularized CNN A (held-out loss rose after epoch 4 in cnn_a): decou
 if not exist %D%\cnn_awd.done (
   %X%\cnn_train.exe train dir=%D% lib=wlib fp=v4k out=cnn_awd.bin epochs=12 hold=20 wd=0.05 drop=0.5 threads=%T% > %O%\n_train_cnn_awd.log 2>&1 && echo ok > %D%\cnn_awd.done
 )
-for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_awd.bin:v4k,rev2_w.bin:v4k threads=%T% > %O%\n_eval_awd_%%q.log 2>&1
+for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_awd.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k "ensw=0,1,1;1,0,1" threads=%T% > %O%\n_eval_awd_%%q.log 2>&1
 echo cnn_awd done %time% >> %O%\night_progress.txt
 
 rem ---- 3. second CNN seed: CNN+CNN ensemble vs CNN+MLP (is the ensemble gain diversity of architecture?)
 if not exist %D%\cnn_a33.done (
   %X%\cnn_train.exe train dir=%D% lib=wlib fp=v4k out=cnn_a33.bin epochs=12 hold=20 seed=33 threads=%T% > %O%\n_train_cnn_a33.log 2>&1 && echo ok > %D%\cnn_a33.done
 )
-for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_a33.bin:v4k ens=1 threads=%T% > %O%\n_eval_a33_%%q.log 2>&1
+for %%q in (hcqry hxqry) do %X%\cnn_win_eval.exe dir=%D% qry=%%q win=w_%%q models=cnn_a.bin:v4k,cnn_a33.bin:v4k,rev3_fp3c16k_big.bin:fp3c16k "ensw=1,1,0;1,0,1;1,1,1;1,1,0.5" threads=%T% > %O%\n_eval_a33_%%q.log 2>&1
 echo cnn_a33 done %time% >> %O%\night_progress.txt
 
 rem ---- 4. summary
