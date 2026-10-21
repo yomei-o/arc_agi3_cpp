@@ -53,7 +53,31 @@ Yardstick: `cnn_win_eval` on clean hcqry (400, window 5,470) and hxqry (400, win
 Budget: "equal training budget" = equal epochs (12 passes over the same 2.38M wlib spectra, same B, lr schedule, dropout, held-out split); the GPU time is ~6× (55 vs 9 min), so cnn_t2 gives the equal-time point.
 
 ## 5. Results
-(pending — `type C:\prog\casmi\cnn\SUMMARY.txt`)
+### 5.1 cnn_a (flat=1, 12 epochs, v4k) vs rev2_w — clean window MRR_in (2026-10-21 11:37)
+| | hcqry logit | cal | **tanimoto** | z(tan)+0.15pop | hxqry logit | cal | **tanimoto** | z(tan)+0.15pop |
+|---|---|---|---|---|---|---|---|---|
+| rev2_w (REV2 MLP) | 0.173 | 0.226 | 0.254 | 0.357 | 0.090 | 0.229 | 0.299 | 0.300 |
+| cnn_a epoch 7 (uncalibrated checkpoint) | 0.206 | – | 0.289 | 0.389 | | | | |
+| **cnn_a** | 0.203 | 0.230 | **0.294** | 0.391 | 0.364 | 0.503 | **0.546** | 0.544 |
+| z-sum rev2_w + cnn_a | 0.187 | 0.232 | 0.297 | 0.400 | 0.195 | 0.384 | 0.495 | 0.490 |
+| fp3 MLPs for reference (fp3_STATUS): rev3_fp3c16k / _big | | | 0.303 / 0.327 | | | | 0.270 / 0.326 | |
+Shuffled-label control: 0.021 / 0.0002 (same as rev2_w) → the scores are spectrum-specific.
+- **The CNN beats the MLP on the same data, targets and epochs: hcqry +0.040 (0.254 → 0.294), hxqry +0.247 (0.299 → 0.546)**, and on hxqry also the 16k-bit fp3 MLPs (0.326). On hcqry it is level with fp3c16k although it predicts only the 4096 v4k bits.
+- The equal-weight z-sum ensemble with rev2_w adds +0.003 on hcqry and *loses* 0.05 on hxqry (the weaker model gets equal weight) → the CNN already contains what rev2_w knows there; a weighted ensemble is the next question (control rev2_w + rev2_w_s32 pending).
+- Overfitting: held-out loss/spectrum 207 → 195.4 (epoch 4) → 201.6 (epoch 12) while the window MRR still rose from epoch 7 (0.289) to 12 (0.294); early stopping on held-out loss would have stopped at 4–6. Regularized run (cnn_awd) is in the night job.
+- Calibration issue: Platt fit made held-out BCE worse (157 → 175, mean a 7733): the CNN's held-out logits are so confident on some bits that the ridge (λ=1) cannot hold a → the 'cal' variant is under-performing; tanimoto (raw probabilities) is the variant to use. Fix: stronger ridge or clip logits before fitting (todo).
+- CPU (4 threads, Kaggle-like): **30 ms/spectrum**.
+
+**Why so much better on hxqry? — leakage check (cpp/cnn/leak_check.cpp)**: hxqry is *less* analog-rich in wlib than hcqry, so the gain is not memorized near-duplicates:
+| | NN Tanimoto (v4k) median | =1.00 | ≥0.90 | ≥0.80 | identical spectra in wlib |
+|---|---|---|---|---|---|
+| hxqry (timsTOF, ordinary molecules) | 0.713 | 0.0 % | 6.3 % | 23.3 % | 1 / 1163 |
+| hcqry (COCONUT natural products) | 0.884 | 20.6 % | 46.0 % | 70.2 % | 21 / 972 |
+Reading: hcqry truths often have a near-identical library analog (the MLP's bin lookup already exploits that, small room for the CNN); hxqry truths are novel scaffolds made of common building blocks (amides, aryl, heterocycles — the Enveda-library style), exactly where position-free detectors of losses/fragments/differences should generalize and fixed-bin weights cannot. This is the theory's prediction, but one test set: confirm on another clean ordinary-molecule holdout before believing +0.25, and check that the gain survives the full pipeline (window → final list) and the LB.
+Also note REV2 logit scoring is unusually poor on hxqry (0.090 vs cal 0.229), the CNN's is not (0.364).
+
+### 5.2 remaining day runs (cnn_g, control ensemble, cnn_np, cnn_t2): `type C:\prog\casmi\cnn\SUMMARY.txt`
+### 5.3 night runs (night_cnn.bat, `cnn_night`, waits for the day job): cnn_f16 (CNN on fp3c16k 16k bits) + ensembles with rev3_fp3c16k_big / rev2_w (no FPNet anywhere), cnn_awd (wd 0.05, drop 0.5), cnn_a33 (2nd seed: CNN+CNN ensemble) → `type C:\prog\casmi\cnn\NIGHT_SUMMARY.txt`
 
 ## 6. Resume steps
 1. `ssh ... "type C:\prog\casmi\cnn\progress.txt"`; job alive: `powershell -c "Get-Process -Id (Get-Content C:\prog\casmi\night\cnn_day.pid)"`; stop only it: `taskkill /pid <pid> /t /f`.
