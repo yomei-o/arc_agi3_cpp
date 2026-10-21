@@ -101,10 +101,8 @@ To finish: copy `p36x_0_shuf_cf.txt`, `p36b_0_shuf_cf.txt` next to the other dum
 | hxqry | −0.0009 | −0.0047 [−0.0144,+0.0035] | −0.0135 [−0.0255,−0.0021] | **+0.0109 [+0.0020,+0.0207]** |
 | hbqry | −0.0078 | −0.0231 [−0.0387,−0.0082] | −0.0508 | **+0.0212 [+0.0091,+0.0336]** |
 → another molecule's CNN prediction hurts; the gain is query-specific.
-**C++ check of cnnpool=2 NOT done**: chkb.bat had a printf-escape bug (``, `
-` in the path), it ran nothing. Fixed
-`cpp/v36/chkb.bat` is on the build machine; run `powershell -ExecutionPolicy Bypass -File C:\prog\casmi
-ight\launch.ps1 pool36_chkb C:\prog\casmi36\chkb.bat`
+**C++ check of cnnpool=2 NOT done**: chkb.bat had a printf-escape bug (backslash-v / backslash-r in the path), it ran nothing. Fixed
+cpp/v36/chkb.bat is on the build machine; run: powershell -ExecutionPolicy Bypass -File C:/prog/casmi/night/launch.ps1 pool36_chkb C:/prog/casmi/v36/chkb.bat (use backslashes)
 (~21 min) and compare `findstr MRR v36\out\p36b_cnn2.log` / its `_ins.csv` with the simulation (final 0.8023, pool 0.8058).
 The simulator is exact at w=0 on all six runs and the C++ term is the same zscore add as attpool, so a match is expected,
 but float-vs-6-digit rounding can flip a few near ties.
