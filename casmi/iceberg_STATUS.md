@@ -71,8 +71,17 @@
 - [M+H]+ だけ（_mh）はわずかに良い（公開の +0.006 と同じ向き）。
 - ライブラリ類似度のゲート（< 0.9）は has の損を消すが hx の得も半分にする → 使わない。
 - 公開流の群内再ランクは、私たちには PubChem スロット（rm 成分）でだけ効く。プール候補は add の方が良い。
+- CE が記録されたスペクトルだけ（`--ceknown`、CE 30 eV 補完なし）: 採点できる問が has 78 / hc 58 に減り、add_w0.5_mh は has −0.002、hc +0.005、add_w0.25_mh は has +0.002、hc +0.002（どれも CI が 0 を含む）。補完 CE でも向きは同じ。
 
-ICEBERG: RESULTS_ICE
+**ICEBERG（CPU、hxqry の先頭 120 問だけ、同じ 120 問の GLACIER と比較）**: 9,314 予測 3,966 s（2.35/s、2 スレッド）、採点できた問 110/120。
+| 変種（120 問、base 0.8467） | ICEBERG | GLACIER |
+|---|---|---|
+| fgr_l1_mh | +0.008 [−0.001,+0.024] | +0.008 [0.000,+0.023] |
+| add_w0.25_mh | +0.009 [0.000,+0.025] | +0.009 [0.000,+0.025] |
+| add_w0.5_mh | +0.009 [0.000,+0.025] | **+0.018** [+0.003,+0.037] |
+| add_w1_mh | +0.008 [−0.002,+0.024] | **+0.022** [+0.005,+0.042] |
+| fgr_pure | −0.204 | −0.118 |
+→ ICEBERG も同じ向きだが GLACIER の約半分、しかも CPU で 4 倍遅い。公開側の結論（最後は GLACIER だけ）と一致。ICE+GL の和は未測定。
 
 ## 5. 実行時間（ビルド機、他エージェントで CPU 91% 使用中の値）
 | モデル | 装置 | 予測/秒 | 1 予測 = 候補 1 つ × 条件 1 つ |
@@ -104,9 +113,9 @@ Kaggle CPU 4 コアの見積り: GLACIER [M+H]+ のみ、40 候補、~2 条件/�
 - `ice_mix.py` — 物差しの混合とその CI
 - `eval_all.bat` — 4 組を作り直して評価（`eval_all.bat gl` / `eval_all.bat ice`）
 - `setup_ref.bat`, `setup_gpu.bat` — 2 つの venv、`gl_run.bat`, `ice_run.bat`, `job_*.bat` — 実行（launch.ps1 で切り離し）
-- `cmp_scores.py`（GPU スタブ vs 本物の DGL）、`peek.py`、`rgrep.py`（ビルド機での読み取り補助）
+- `cmp_scores.py`（GPU スタブ vs 本物の DGL）、`subset_mols.py`、`peek.py`、`rgrep.py`（ビルド機での読み取り補助）
 ビルド機の出力 `C:\prog\casmi\iceberg\`: `gl_<tag>.json`（予測スコア）、`list_/cands_/lib_<tag>.json`、`out_<tag>_<variant>.csv`、`rr_<tag>.tsv`、`eval_gl_<tag>.txt`、`mix_gl_has.txt` / `mix_gl_hx.txt`。
 
 ## 続き（再開手順）
-- ICEBERG hxqry 先頭 120 問: `C:\prog\casmi\night\ice_ice_hx0.log`、出力 `ice_hx0.json` → `ice_eval.py eval ... hx0 ... ice_hx0.json`（120 問以外は base のまま = 被覆の差に注意）。
+- ICEBERG hxqry 先頭 120 問は済み（`ice_hx0.json`、評価 `eval_ice_hx120.txt` / 同じ 120 問の GLACIER `eval_gl_hx120.txt`、`subset_mols.py` で正解を絞る）。残りの 280 問・他の組は CPU で ~1 時間 / 100 問（2 スレッド）。
 - 統合するなら: v30/v32 ノートブックの後処理に GLACIER（[M+H]+、add_w0.5）。Kaggle 用の torch_scatter 代替と rdkit 2025.3.6 wheel の用意が先。
