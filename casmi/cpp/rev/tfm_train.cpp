@@ -148,6 +148,9 @@ int countPeaks(const Head& h, const float* mz, const float* it, int maxP) {
   for (int i = 0; i < h.n; ++i) if (mz[i] > 0.f && mz[i] <= h.precursor + 2.f && it[i] / mx >= 1e-3f) ++c;
   return std::max(1, std::min(c, maxP));
 }
+// fpnet=1 (FPNet-compatible export, cpp/fpown): no instrument input (always "unknown" = 5, folded into the adduct
+// table at export) and unknown adduct -> mode +1, exactly as fpnet_ggml feeds the network.
+bool gFpnet = false;
 void decodeTag(int tag, int& ad, int& in, float& mode) {
   int a = -1, s = -1;
   if (tag >= 0) {
@@ -158,6 +161,7 @@ void decodeTag(int tag, int& ad, int& in, float& mode) {
   ad = (a >= 0 && a < 10) ? a : 10;
   in = (s >= 0 && s < 5) ? s : 5;
   mode = (a >= 0 && a < 10) ? OUR_MODE[a] : 0.f;
+  if (gFpnet) { in = 5; if (!(a >= 0 && a < 10)) mode = 1.f; }
 }
 
 void buildBatch(const Store& st, const std::vector<int>& specs, int maxP, tfm::HostBatch& hb) {
@@ -647,6 +651,37 @@ int main(int argc, char** argv) {
   std::string evalSpec = get(A, "eval", "cqry:f21_cqry.txt,tqry:f21_tqry.txt");
   std::string fp = get(A, "fp", "v4k");
   tfm::tf32Flag() = geti(A, "tf32", 1) != 0;
+  gFpnet = geti(A, "fpnet", 0) != 0;
+  tfm::fpnetPhase() = gFpnet;
+  if (gFpnet) std::printf("fpnet mode: instrument fixed to unknown, unknown adduct -> mode +1\n");
+  if (evalSpec == "none") evalSpec.clear();
+  if (A.count("threads")) parallel_cap() = unsigned(geti(A, "threads", 6));
+
+  // dumpz model=x.bin q=<stem> out=<file> [maxMols=0]: per-spectrum logits in fpnet_ggml's _spec.bin layout
+  // (i32 nspec, i32 nbits, f32[nspec*nbits] in head order; spectra of molecules beyond the first maxMols left 0)
+  if (mode == "dumpz") {
+    tfm::Model m;
+    if (!m.load(dir + "/" + get(A, "model", ""), false)) { std::fprintf(stderr, "cannot load model\n"); return 1; }
+    Store q = loadSpectra(dir, get(A, "q", "hcqry"));
+    const int maxMols = geti(A, "maxMols", 0);
+    std::vector<int> mols;
+    for (size_t s = 0; s < q.head.size(); ++s) mols.push_back(q.head[s].mol);
+    std::sort(mols.begin(), mols.end());
+    mols.erase(std::unique(mols.begin(), mols.end()), mols.end());
+    if (maxMols > 0 && int(mols.size()) > maxMols) mols.resize(maxMols);
+    std::vector<int> spec;
+    for (size_t s = 0; s < q.head.size(); ++s) if (std::binary_search(mols.begin(), mols.end(), q.head[s].mol)) spec.push_back(int(s));
+    std::vector<float> Z;
+    predictLogits(m, q, spec, Z);
+    std::vector<float> all(q.head.size() * size_t(m.c.NB), 0.f);
+    for (size_t i = 0; i < spec.size(); ++i)
+      std::copy(Z.begin() + i * m.c.NB, Z.begin() + (i + 1) * m.c.NB, all.begin() + size_t(spec[i]) * m.c.NB);
+    std::FILE* f = std::fopen((dir + "/" + get(A, "out", "dumpz.bin")).c_str(), "wb");
+    int32_t ns = int32_t(q.head.size()), nb = m.c.NB;
+    std::fwrite(&ns, 4, 1, f); std::fwrite(&nb, 4, 1, f); std::fwrite(all.data(), 4, all.size(), f); std::fclose(f);
+    std::printf("dumpz: %zu spectra of %zu molecules -> %s\n", spec.size(), mols.size(), get(A, "out", "dumpz.bin").c_str());
+    return 0;
+  }
 
   CandFps cf;
   {
@@ -655,7 +690,7 @@ int main(int argc, char** argv) {
     int i = 0;
     while (std::getline(f, line)) cf.keyIdx[line.substr(0, line.find('\t'))] = i++;
   }
-  cf.fps = loadFps(dir + "/" + candStem + "_" + fp + ".bin");
+  if (!evalSpec.empty()) cf.fps = loadFps(dir + "/" + candStem + "_" + fp + ".bin");
 
   if (mode == "eval") {
     std::vector<std::unique_ptr<tfm::Model>> owned;
@@ -713,7 +748,8 @@ int main(int argc, char** argv) {
 
   Store st = loadSpectra(dir, lib);
   Fps fps = loadFps(dir + "/" + lib + "_" + fp + ".bin");
-  auto sets = loadEval(dir, evalSpec, cf);
+  std::vector<EvalSet> sets;
+  if (!evalSpec.empty()) sets = loadEval(dir, evalSpec, cf);
 
   tfm::Model m;
   const std::string ckPath = dir + "/" + out + "_ck.bin";
@@ -723,8 +759,8 @@ int main(int argc, char** argv) {
     step0 = m.adamT;
     std::printf("resumed %s at step %lld\n", ckPath.c_str(), (long long)step0);
   } else {
-    m.c.d = geti(A, "d", 256); m.c.L = geti(A, "L", 4); m.c.H = geti(A, "H", 8); m.c.ff = geti(A, "ff", 4);
-    m.c.demb = geti(A, "demb", m.c.d); m.c.HH = geti(A, "HH", 2048); m.c.maxPeaks = geti(A, "maxPeaks", 128);
+    m.c.d = geti(A, "d", gFpnet ? 512 : 256); m.c.L = geti(A, "L", gFpnet ? 8 : 4); m.c.H = geti(A, "H", 8); m.c.ff = geti(A, "ff", 4);
+    m.c.demb = geti(A, "demb", m.c.d); m.c.HH = geti(A, "HH", 2048); m.c.maxPeaks = geti(A, "maxPeaks", gFpnet ? 160 : 128);
     m.c.NB = int(fps.nBits);
     if (fp != "ecfp" && !loadVocab(dir + "/" + fp + ".bin", m)) std::printf("note: no vocabulary %s.bin\n", fp.c_str());
   }

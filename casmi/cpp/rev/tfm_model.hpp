@@ -118,6 +118,9 @@ template <class T> inline void ensure(bk::Buffer<T>& b, int64_t n) {
 // Row-major C[M,N] = alpha op(A)[M,K] op(B)[K,N] + beta C, `batch` matrices with
 // element strides sA/sB/sC. lda/ldb/ldc are the stored row lengths.
 inline bool& tf32Flag() { static bool f = false; return f; }
+// FPNet-inference phases (cpp/fpown): angle = float(x) * float(2 pi / wav) in single precision, exactly as
+// fpnet_ggml computes sinf(x * inv) from the exported inv; default (false) = exact double phase reduction.
+inline bool& fpnetPhase() { static bool f = false; return f; }
 #ifdef USE_CUDA
 inline cublasHandle_t cublas() {
   static cublasHandle_t h = nullptr;
@@ -411,6 +414,7 @@ struct Model {
       const float* MZ = dmz.data(); const float* IT = dit.data(); const float* PR = dprec.data(); const float* MO = dmode.data();
       const int32_t* NP = dnp.data(); const double* IW = iwav.data(); real* F = Ftok.data(); real* FG = Fg.data();
       const int demb = c.demb;
+      const bool fph = fpnetPhase();
       pfor(Rt * Ft, [=] BK_HD (int64_t idx) {
         int64_t t = idx / Ft; int cc = int(idx % Ft);
         int64_t b = t / NB_; int j = int(t % NB_);
@@ -419,9 +423,14 @@ struct Model {
         if (cc < 2 * demb) {
           double x = cc < demb ? double(m) : double(fmaxf(PR[b] - m, 0.f));
           int k = cc % demb, i = k % hdem;
-          double ph = x * IW[i]; ph -= floor(ph);
-          real a = real(6.283185307179586 * ph);
-          F[idx] = k < hdem ? sin(a) : cos(a);
+          if (fph) {
+            float af = float(x) * float(6.283185307179586 * IW[i]);
+            F[idx] = real(k < hdem ? sin(double(af)) : cos(double(af)));
+          } else {
+            double ph = x * IW[i]; ph -= floor(ph);
+            real a = real(6.283185307179586 * ph);
+            F[idx] = k < hdem ? sin(a) : cos(a);
+          }
         } else {
           float v = IT[t];
           F[idx] = cc == 2 * demb ? real(v) : real(v * v);
@@ -431,9 +440,14 @@ struct Model {
         int64_t b = idx / Fgw; int cc = int(idx % Fgw);
         if (cc < demb) {
           int i = cc % hdem;
-          double ph = double(PR[b]) * IW[i]; ph -= floor(ph);
-          real a = real(6.283185307179586 * ph);
-          FG[idx] = cc < hdem ? sin(a) : cos(a);
+          if (fph) {
+            float af = PR[b] * float(6.283185307179586 * IW[i]);
+            FG[idx] = real(cc < hdem ? sin(double(af)) : cos(double(af)));
+          } else {
+            double ph = double(PR[b]) * IW[i]; ph -= floor(ph);
+            real a = real(6.283185307179586 * ph);
+            FG[idx] = cc < hdem ? sin(a) : cos(a);
+          }
         } else if (cc == demb) FG[idx] = real(log1p(double(PR[b])) / 10.0);
         else FG[idx] = real(MO[b]);
       });

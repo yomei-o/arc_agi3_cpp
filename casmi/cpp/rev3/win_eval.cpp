@@ -203,11 +203,28 @@ int main(int argc, char** argv) {
     size_t c = item.find(':');
     std::string path = item.substr(0, c), tag = item.substr(c + 1);
     Model m;
-    if (!m.load(dir + "/" + path)) { std::fprintf(stderr, "cannot load %s\n", path.c_str()); return 1; }
+    // "<x>_mol.bin" = per-molecule logits written by fpnet_ggml (i32 nmol, i32 nbits, per molecule i32 mol + f32[nbits]);
+    // p = sigmoid(logit), no calibration (logit variant = fpnet_pool's cand_fp . logits up to the 1e-6 clamp)
+    const bool isMol = path.size() > 8 && path.compare(path.size() - 8, 8, "_mol.bin") == 0;
+    std::vector<std::vector<float>> P;
+    if (isMol) {
+      auto b = slurp(dir + "/" + path);
+      int32_t nm, nb; std::memcpy(&nm, b.data(), 4); std::memcpy(&nb, b.data() + 4, 4);
+      m.NB = nb; m.H.clear();
+      P.assign(q.nMol, {});
+      const char* r = b.data() + 8;
+      for (int i = 0; i < nm; ++i) {
+        int32_t mol; std::memcpy(&mol, r, 4); r += 4;
+        const float* z = reinterpret_cast<const float*>(r); r += 4 * size_t(nb);
+        if (mol < 0 || size_t(mol) >= P.size()) continue;
+        P[mol].resize(nb);
+        for (int k = 0; k < nb; ++k) P[mol][k] = 1.f / (1.f + std::exp(-z[k]));
+      }
+    } else if (!m.load(dir + "/" + path)) { std::fprintf(stderr, "cannot load %s\n", path.c_str()); return 1; }
     Fps F = loadFps(dir + "/" + win + "_" + tag + ".bin");
     if (int(F.nBits) != m.NB) { std::fprintf(stderr, "bits mismatch %s: %u vs %d\n", tag.c_str(), F.nBits, m.NB); return 1; }
     auto t0 = std::chrono::steady_clock::now();
-    auto P = predictByMol(m, q);
+    if (!isMol) P = predictByMol(m, q);
     MS ms;
     ms.name = path;
     ms.s.assign(NV, std::vector<std::vector<float>>(nQ));
