@@ -19,8 +19,9 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boltz_merge as bm  # noqa: E402
 
+TIMS = None
 V35 = dict(T1=2, T2=0.5, pi=0.2, pimode="relz", a=0.5)
-COL = {"cnn": 6, "att": 7, "fp3": 8}
+COL = {"cnn": 5, "att": 6, "fp3": 7}  # load_cf tuple: idx score isPool pop name cnn att fp3
 
 
 def zs(v):
@@ -89,7 +90,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     sets = [x.split(":") for x in sys.argv[3].split(",")]
     grid = [("v35 (w=0)", {})]
-    for w in (0.5, 1, 2):
+    for w in (0.5, 1, 2, 3, 4):
         grid.append((f"cnn {w}", {"cnn": w}))
     for w in (1, 2):
         grid.append((f"cnn {w} PERM-control", {"cnn": w, "_perm": 1}))
@@ -102,6 +103,18 @@ def main():
     grid.append(("cnn 1 + fp3 1", {"cnn": 1, "fp3": 1}))
     for tag, mols in sets:
         cf = load_cf(f"{D}/{tag}_cf.txt")
+        global TIMS
+        TIMS = None
+        hb = f"{D}/{mols}_head.bin"
+        if os.environ.get("POOL36_TIMS") == "1" and os.path.exists(hb):
+            import struct
+            raw = open(hb, "rb").read()
+            TIMS = set()
+            for k in range(len(raw) // 20):
+                _, mol, _, _, tg = struct.unpack_from("<fiiii", raw, 20 * k)
+                if mol >= 0 and tg >= 0 and tg % 16 == 0:
+                    TIMS.add(mol)
+            print(f"   (subset column = queries with a timsTOF spectrum: {len(TIMS)})")
         g = list(grid)
         shp = f"{D}/{tag}_shuf_cf.txt"  # same run with cnnshuf=7: query q scored with query q+7's CNN p
         if os.path.exists(shp):
@@ -109,8 +122,8 @@ def main():
             ok = all(len(sh.get(q, [])) == len(r) and all(a[0] == b[0] and a[4] == b[4] for a, b in zip(r, sh[q]))
                      for q, r in cf.items())
             if ok:
-                cf2 = {q: [a[:6] + (b[5],) + a[7:] for a, b in zip(r, sh[q])] for q, r in cf.items()}
-                for w in (0.5, 1, 2):
+                cf2 = {q: [a[:5] + (b[5],) + a[6:] for a, b in zip(r, sh[q])] for q, r in cf.items()}
+                for w in (1, 2, 3):
                     g.append((f"cnn {w} SHUF-query control", {"cnn": w, "_cf": cf2}))
             else:
                 print("shuffle dump does not align, skipped")
@@ -140,8 +153,14 @@ def main():
             Q, P, F = lists(OUT, mols, ptag)
             rp, rf = rrs(Q, P), rrs(Q, F)
             bp, bf = boot(base_p, rp), boot(base_f, rf)
+            # hard subset: no near-identical library spectrum (libMax < 0.9) = where the pool fusion decides
+            hi = [i for i, q in enumerate(Q0) if q["lib"] < 0.9]
+            if TIMS is not None:  # optional: queries with a timsTOF spectrum (tag % 16 == 0) instead
+                hi = [i for i in range(len(Q0)) if i in TIMS]
+            bh = boot([base_f[i] for i in hi], [rf[i] for i in hi])
             print(f"   {name:28s} {sum(rp)/len(rp):9.4f} {bp[0]:+.4f} [{bp[1]:+.4f},{bp[2]:+.4f}]      "
-                  f"{sum(rf)/len(rf):9.4f} {bf[0]:+.4f} [{bf[1]:+.4f},{bf[2]:+.4f}]", flush=True)
+                  f"{sum(rf)/len(rf):9.4f} {bf[0]:+.4f} [{bf[1]:+.4f},{bf[2]:+.4f}]   lib<0.9 n={len(hi)} "
+                  f"{sum(rf[i] for i in hi)/max(1,len(hi)):.4f} {bh[0]:+.4f} [{bh[1]:+.4f},{bh[2]:+.4f}]", flush=True)
 
 
 if __name__ == "__main__":
