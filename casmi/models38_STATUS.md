@@ -67,3 +67,68 @@ cnnpool 0 の MRR は基準と同一 0.8731 / …）。f16 の列 = `cnn_win_eva
 
 CPU 推論コスト（ビルド機、4 スレッド、他ジョブで負荷あり、hxqry 1,163 スペクトル）: cnn_a 48.8 s = **42 ms/スペクトル**、cnn_f16 59.6 s = **51 ms/スペクトル**
 （16k ビットの出力層の分だけ重い）。テスト ~1,200 スペクトルで 1 モデル ~1 分、2 シードで ~2 分。どちらも時間的には余裕があるが、利得がないので足さない。
+
+## 1. own FPNet: 長く学習（wlib 12 エポック、プール項の指標で選ぶ）
+列 = fpnet_ggml（notebook と同じソース）の分子ロジット、候補の 10226 ビット（`cpp/fpown/fp10226.py` を p36pool_mols.txt 119,046 分子と
+生成候補 g{x,b,bs}_mols.txt に適用 → ビルド機 `models38\{p36pool,gx,gb,gbs}_fp10226.bin`、壊れた SMILES 0）。
+本番の形 = ロジット内積（fpnet_pool）の + 1.0 z、ここでは cnn_a 2 の上に足す（v36nofp と同じ組）。注意: 本番の phys は生成候補に
+FPNet の値を持たせず「クエリ平均」で埋める（rm=0 ではそれ自体が点になる、pretrain_STATUS 8.3 の注意）→ ここでは生成候補にも実ビットで値を付けた
+（モデルの強さの比較として公平）。
+### 現行モデル（fpown_w = 5 エポック、本番 fpnet_own_f16.bin と同じレシピ）の基準（表 `casmi/models38/fpn_base_grid.txt`、`fpn_tan_grid.txt`）
+final、v35 との差 / cnn 2 との差 [95% CI]:
+| config | hxqry | hbqry | hbsqry |
+|---|---|---|---|
+| cnn 2 + fpn 0.5 | +0.0113 / +0.0004 | +0.0245 / +0.0033 [+0.0000,+0.0076] | +0.0155 / +0.0029 [+0.0000,+0.0067] |
+| **cnn 2 + fpn 1（本番の形）** | +0.0112 / **+0.0003 [−0.0005,+0.0011]** | +0.0281 / **+0.0069 [+0.0017,+0.0136]** | +0.0147 / **+0.0021 [−0.0021,+0.0067]** |
+| cnn 2 + fpn 1.5 | +0.0112 / +0.0003 | +0.0290 / +0.0078 | +0.0188 / +0.0063 [+0.0004,+0.0129] |
+| cnn 2 + fpn 2 | +0.0126 / +0.0017 | +0.0269 / +0.0056 | +0.0188 / +0.0063 |
+| fpn 1 だけ（CNN なし） | +0.0032 | +0.0113 | +0.0083 |
+| cnn 2 + fpn(Tanimoto 形) 1 / 2 | +0.0008 / +0.0032 [+0.0002,+0.0070] | +0.0075 / +0.0080 | +0.0063 [+0.0004,+0.0129] / **+0.0094 [+0.0010,+0.0187]** |
+| 対照 Tanimoto 形 2 の SHUF / PERM（cnn 2 + ft 2 との差） | −0.0052 / −0.0192 | −0.0240 / −0.0486 | −0.0082 / −0.0189 |
+| 5 エポック版の途中 ep2 / ep3 / ep4 / ep5、cnn 2 + fpn 1 の cnn 2 との差 | −0.0001 / +0.0000 / +0.0003 / +0.0003 | +0.0039 / +0.0034 / **+0.0083** / +0.0069 | +0.0033 / +0.0029 / +0.0046 / +0.0021 |
+| 対照 cnn 2 + fpn~ 1（SHUF） / PERM | +0.0001 / −0.0033 | −0.0083 / −0.0131 | −0.0018 / +0.0010 |
+| FT の上で: cnn 2 + ft 2 + fpn 1 / 0.5 | +0.0069 / +0.0077（cnn 2 + ft 2 は +0.0065） | +0.0061 / +0.0056（同 +0.0077） | +0.0111 / +0.0094（同 +0.0069） |
+FT の上（v37 の組 cnn 2 + ft 2 との差、表 `fpn_tan2_grid.txt`）: + fpn 内積 1 = +0.0005 / −0.0015 / +0.0042（3 集合の和 +0.003）、
+**+ fpn Tanimoto 1 = +0.0039 [+0.0001,+0.0088] / −0.0004 / +0.0050 [−0.0001,+0.0113]（和 +0.0085）**、Tanimoto 2 = +0.0026 / +0.0024 / +0.0032（和 +0.0082）。
+読み方: CNN の上での FPNet 項は **hbqry で +0.007（CI 0 の上）、hxqry ~0、hbsqry +0.002**。hxqry で効かないのは、ロジット内積が候補のビット数に強く
+引っ張られる形（Tanimoto 形にすると w 2 で +0.003 と少し出る）と、CNN が同じ情報を既に持つため。FT（ep5）を入れた後の上乗せは −0.002〜+0.004 で
+ノイズ程度。**エポックによる差はプールでは小さい**: 5 エポック版の途中 ep2〜ep5 で hb +0.003〜+0.008、hbs +0.002〜+0.005、hx ~0 と順序が付かない
+（窓 MRR は同じ区間で hx 0.38 → 0.54 と大きく伸びたのに）。→ 12 エポックも、プール項としては大きな差は期待しにくい（夜間の表で確認）。
+**むしろ項の形**: 同じ fpown_w を Tanimoto 形（p = sigmoid(logit) の連続 Tanimoto、CNN/FT と同じ形）にすると内積形より 3 集合の和で +0.005〜0.01 良い
+（FT の上でも +0.0085 vs +0.003）。CI は個別には 0 をまたぐが、対照（SHUF/PERM）はすべて負。本番の fpnet_pool は内積を出しているので、
+Tanimoto に変えるのは fpnet_pool の出力（p と候補ビット、pool730_fp10226.bin は既にある）の数行の変更 + 生成候補の扱い（本番は平均で補完）。tune38（重み探索）側の候補。
+### 12 エポック（夜間、結果は fpn_grid.txt）
+`cpp/models38/fpn12.bat`（m38_fpn12）: wlib 12 エポック（cosine を 12 エポックに、seed 31、他は fpown_train.bat と同じ、threads 2）→ fpown12_w_ep<N>.bin、
+続けて alllib 12 エポック（hold 0）→ fpown12_all_ep<N>.bin、ep5〜12 を FPN2 f16 に変換して `models38\fpn_all\fpown12_all_ep<N>_f16.bin`。
+`fpn_watch.bat`（m38_fpn_watch）: 次のエポックのファイルが出たら前のエポックを fpn_eval.bat（tfm2fpnet → fpnet_ggml 2 スレッド、3 集合 ~6 分）で評価、
+12 エポック後に `fpn_grid.bat` → **`C:\prog\casmi\models38\fpn_grid.txt`**（e1..e12 と f5、o1..o4 = 5 エポック版の途中、t = Tanimoto 形、SHUF/PERM 対照、
+基準 = cnn 2 + f5 1）。速度: GPU を FT 第 2 シードと共有して 1 エポック ~39 分 → wlib ~22:50 終了、alllib ~07:00〜08:00 終了の見込み。
+**選び方**: hx/hb/hbs の「cnn 2 + e<N> 1 vs cnn 2 + f5 1」の差が 3 集合とも ≥ 0 で、合計が最大のエポック N。良ければ本番は
+`fpown12_all_ep<N>_f16.bin`（同じ 12 エポックのスケジュールの N エポック目 = wlib で測ったものと同じ位置）を fpnet_own_f16.bin の代わりに。
+差がノイズ内（±0.003）なら今の fpnet_own_f16.bin のまま。Kaggle の CPU コストは同じ構造なので変わらない（FPNet 段 75 分の上限内、v36_STATUS）。
+
+### 3b. FT 第 2 シード（夜間）
+`cpp/models38/ftb.bat`（m38_ftb）: pt_w.bin を head seed 32 で export → wlib 8 エポック（ft8 と同じ、seed 32、threads 2）→ `C:\prog\casmi\ft8b_ep<N>.bin`、
+ep3/5/8 の分子ロジット（hxqry/hbqry/hbsqry）→ `pretrain\ft8b_ep<N>_<q>_mol.bin`。続けて（CNN の本番追加は無し = cnnprod.bat を置いていない）
+alllib で同じ seed 32 の微調整 8 エポック（pt_all.bin から）→ `C:\prog\casmi\ft_allb_ep<N>.bin`（本番の第 2 シード候補）。
+速度: GPU 共有で 1 エポック ~28 分 → wlib ~18:45、分子ロジット ~19:15、alllib ~23:30 の見込み。
+評価（翌朝、CPU 1 コア数分）: 
+```
+python casmi/py/pool38.py <D> <out> p36x_0:hxqry:x,p36b_0:hbqry:b,p36bs_0:hbsqry:bs "cnn:2,f5:2;cnn:2,s5:2;cnn:2,f5:1,s5:1;cnn:2,f5:1.5,s5:1.5;cnn:2,f5:2,s5:2;cnn:2,s5~:2;cnn:2,s5:2,@perm=s5;cnn:2,f5:1,s8:1" ^
+  col=f5=tan:pretrain\ft8_ep5_{q}_mol.bin#<FT bits> col=s5=tan:pretrain\ft8b_ep5_{q}_mol.bin#<FT bits> col=s8=tan:pretrain\ft8b_ep8_{q}_mol.bin#<FT bits> ref=cnn:2,f5:2
+<FT bits> = pretrain\p36pool_fp3c16k.bin::pretrain\p36pool_mols.txt;pretrain\g{s}_fp3c16k.bin::pretrain\g{s}_mols.txt
+```
+（ビルド機なら `cd /d C:\prog\casmi` で `"C:\Program Files\Python312\python.exe" models38\py\pool38.py models38\D models38\grid_out ...`）。
+2 シードの和（f5 1 + s5 1 など）が cnn 2 + f5 2 を 3 集合で上回れば、本番は ft_all_ep5 + ft_allb_ep5 の 2 モデル（Kaggle CPU 2 × ~4 分）。
+
+## 夜間ジョブ（2026-10-22 15:02〜、すべて launch.ps1 で切り離し、自分の PID だけ）
+| 名前 | PID | 中身 | 進行 / 出力 |
+|---|---|---|---|
+| m38_fpn12 | 18040 | FPNet wlib 12 ep → alllib 12 ep（GPU、2 スレッド） | `models38\fpn12_progress.txt`、ログ `models38\fpn12_w.log` / `fpn12_all.log`、`C:\prog\casmi\fpown12_{w,all}_ep<N>.bin`、`models38\fpn_all\*_f16.bin` |
+| m38_fpn_watch | 9208 | エポックごとの評価 → fpn_grid.txt（CPU 2 スレッド） | `models38\fpn12_progress.txt`（"eval ep<N> done"）、`models38\fpn\*_mol.bin`、**`models38\fpn_grid.txt`** |
+| m38_ftb | 10860 | FT seed 32 wlib 8 ep → 分子ロジット → alllib 8 ep（GPU、2 スレッド） | `models38\ftb_progress.txt`、`ftb_train.log` / `ftb_train_all.log`、`ft8b_ep*.bin`、`ft_allb_ep*.bin` |
+| m38_fpn_old | 20944 | 5 エポック版の ep1〜4 の評価（CPU 2、~16:00 に終わる） | `models38\fpn\fpown_w_ep*_mol.bin` |
+確認: `type C:\prog\casmi\models38\fpn12_progress.txt C:\prog\casmi\models38\ftb_progress.txt`、
+生存 `powershell -c "Get-Process -Id 18040,9208,10860"`、止めるとき `taskkill /pid <pid> /t /f`（これらだけ）。
+落ちた場合: 同じ名前で `C:\prog\casmi\models38\L.bat "fpn12"`（または ftb / fpn_watch）を再実行 → _ck.bin から再開・既にある評価は飛ばす。
+（注意: ssh 経由の cmd で `timeout` は "入力のリダイレクトはサポートされていません" で即終了するが、launch.ps1（WMI）で起動したジョブでは正常に待つ。）
