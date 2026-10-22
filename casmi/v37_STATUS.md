@@ -67,7 +67,12 @@ not a big step.
 | file | to |
 |---|---|
 | `rdkit-min\phys_v37pc.cpp` | casmi26-rdkit-min rdkit-min/ |
-| `pool730\ft_all_ep5.bin` (production: pt_all + ft_all on alllib, epoch 5, 221,665,360 B) | the pool730/ folder holding pool730_head.bin / cnn_prod_c.bin |
+| `pool730\ft_all_ep5.bin` (production: pt_all + ft_all on alllib, epoch 5, 221,665,360 B, md5 264b1264…, written 14:27 by pt_prod) | the pool730/ folder holding pool730_head.bin / cnn_prod_c.bin |
+Production model check (`py/tfm_hdr.py`): same TFM1 config (d512 L6 H8 ff4 HH2048 NB16384 maxPeaks 64) and the **same fp3c16k
+vocabulary** (rE 300 rF 1, vocab md5 a15a6010…) as ft8_ep5.bin, weights finite; staged copy md5 = source md5.
+CPU smoke test (`pt_train_cpu2 mollogits model=ft_all_ep5.bin qry=hxqry threads=4`, same forward code as phys_v37pc;
+`py/mol_cmp.py`): 400 x 16384 logits, 0 non-finite, mean logit −14.7 (ft8_ep5 −13.8), mean sum p 389 (372), per-molecule
+correlation of p with ft8_ep5 median 0.94 (min 0.62). (Not a score: ft_all saw the hxqry molecules.)
 No new rev/ headers. **Prerequisite: v36\ds_add uploaded** (rev/cnn_model.hpp, cnn_layers.hpp, cnn_prod_c.bin,
 fpnet_own_f16.bin, delete fpnet_full1_f16.bin) — phys_v37pc includes rev/cnn_model.hpp like phys_v36pc.
 `g++ -std=c++20 -fsyntax-only` with the Kaggle include layout (ds_rdkit + v36 ds_add headers + phys_v37pc): **rc 0**
