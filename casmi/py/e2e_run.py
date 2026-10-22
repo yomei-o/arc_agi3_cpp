@@ -41,7 +41,10 @@ EXTRA = {Path("pool730/cnn_prod_c.bin"): CAS / "cnn_a_c.bin",                   
          Path("fpnet/fpnet_own_f16.bin"): CAS / "fpown" / "fpown_w_f16.bin",       # own FPNet trained on wlib
          Path("rdkit-min/phys_v36pc.cpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "phys_v36pc.cpp",
          Path("rdkit-min/rev/cnn_model.hpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "rev" / "cnn_model.hpp",
-         Path("rdkit-min/rev/cnn_layers.hpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "rev" / "cnn_layers.hpp"}
+         Path("rdkit-min/rev/cnn_layers.hpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "rev" / "cnn_layers.hpp",
+         # v37 (v37_STATUS.md): FT pool term, holdout-safe fine-tuned transformer (pt_w + ft8 on wlib, epoch 5)
+         Path("pool730/ft_all_ep5.bin"): CAS / "ft8_ep5.bin",
+         Path("rdkit-min/phys_v37pc.cpp"): CAS / "v37" / "ds_add" / "rdkit-min" / "phys_v37pc.cpp"}
 import shutil
 for p in DS.rglob("*"):
     rel = p.relative_to(DS)
