@@ -83,7 +83,7 @@ enumeration; per-run reuse is not where the time is.**
 | hbqry 4 thr, v38 poolcache=0 pccache=0 (b38_off) | v37\out\c37b_ft2 (3 thr) | same | same | same | same | same | same |
 | hbqry 4 thr, v38 poolcache=1 pccache=1 (b38_on) | c37b_ft2 | same | same | same | same | same | same |
 | hbqry 4 thr, v38 pccache only, uncapped (b38_fin) | c37b_ft2 | same | same | same | same | same | same |
-| hbqry 4 thr, final source (pccachemax 3M, cap reached; b38_c3m) | c37b_ft2 | PENDING | | | | | |
+| hbqry 4 thr, **final source** (pccachemax 3M, cap reached: 3.0M stored, 433k hits; enumeration 549.1 s, total 814.9 s; b38_c3m) | c37b_ft2 | same | same | same | same | same | same |
 | hasqry 2 thr, v38 both caches (s38_on) vs v37 run today (s37_ft2, bT1 3 / bpi 0.1) | v37\out\s37_ft2 | same | same | same | same | same | - |
 | hasqry 2 thr, final v38, pccachemax=1000000 (cap path, s38_cap) | s37_ft2 | PENDING | | | | | |
 MRR (mrr.py) hbqry 0.8129 / 0.8100 in every run = v37.
@@ -138,3 +138,10 @@ and 87-96% of those molecules are seen once per run, so only reuse **across runs
 `cpp/rdkit-min/phys_v38pc.cpp`; `cpp/v38/`: build_v38.bat (MSVC), run38.bat / run38b.bat (= run37 with the v38 exe),
 lane1.bat (hbqry off/on + fc), lane2.bat (hasqry v37 + v38), lane3.bat (final, hbqry), lane4.bat (final, hasqry, cap),
 kcheck38.bat. Outputs `C:\prog\casmi\v38\out\`, references `C:\prog\casmi\v37\out\c37b_ft2*`, `s37_ft2*`.
+
+## Resume
+- Re-run a check: on the build machine `powershell -ExecutionPolicy Bypass -File C:\prog\casmi\night\launch.ps1 <name> C:\prog\casmi\v38\lane5.bat`
+  (log `C:\prog\casmi\night\<name>.log`, SAME/DIFF lines per file). Exes: `v38\phys_v38pc.exe` (first build, poolcache
+  default 1), `v38\b\` (pccachemax 8M), `v38\c\` (final source, md5 1cf1b28f4b98e8c2daa6349461a7fbf0).
+- Next measurement if pursued: size of a distinct-index + multiplicity PubChem fp3 file (sample 1M compounds), and the
+  float-difference / tie check of that order-changed sum on hbqry + hasqry.
