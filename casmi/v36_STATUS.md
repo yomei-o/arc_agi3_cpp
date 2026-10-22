@@ -83,7 +83,17 @@ of 800 queries`, `| output + 1 z(fpnet): candidates with score 90864`, `final: r
 | **v36nofp** | **0.5804** [0.539, 0.619] | **0.8908** [0.867, 0.912] | **0.7356** |
 | v36 − v35 | +0.0105 [−0.004, +0.024] (61 better / 27 worse) | **+0.0194 [+0.009, +0.031]** (29 / 6) | **+0.0149 [+0.006, +0.024]** |
 | v35 − v33 | +0.0124 [−0.005, +0.031] | +0.0101 [−0.001, +0.022] | +0.0113 [+0.001, +0.021] |
-ABLATION_PLACEHOLDER
+Ablations (`cpp/v36/abl36.bat`: same exe / inputs, ranker re-run with one term removed, notebook merge):
+| run | hcqry | hxqry | all |
+|---|---|---|---|
+| v36 without CNN (own FPNet only) | 0.5804 | 0.8852 | 0.7328 |
+| v36 without FPNet (CNN only) | 0.5700 (= v35, as cnninst requires) | 0.8840 | 0.7270 |
+| CNN term, given FPNet (v36 − no-CNN) | +0.0000 (cnninst: no timsTOF in hc) | +0.0056 [−0.002, +0.013] | +0.0028 |
+| own FPNet, given CNN (v36 − no-FPNet) | +0.0105 [−0.004, +0.024] | **+0.0068 [+0.002, +0.013]** | **+0.0086 [+0.001, +0.017]** |
+| CNN alone over v35 (no-FPNet − v35) | 0 | +0.0126 | |
+Reading: both terms help on the timsTOF set; they overlap (CNN +0.013 alone, +0.006 on top of FPNet), as expected for
+two spectrum->fingerprint models. The own FPNet carries hcqry (non-timsTOF, CNN switched off there). Holdout-to-LB
+transfer has been 0.3-0.5x, so expect roughly +0.005 to +0.01 on the LB from v35nofp -> v36nofp.
 
 ### Wall time per stage (build machine, 4 cores; v36 / v35)
 | stage | v36 | v35 |
