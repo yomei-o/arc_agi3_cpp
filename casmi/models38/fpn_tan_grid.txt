@@ -1,0 +1,33 @@
+== p36x_0 (hxqry, 400 queries, 80824 candidates) f5: dot missing bits 0; t5: tan missing bits 0; e2: dot missing bits 0; t2: tan missing bits 0
+   config                                    pool MRR final MRR      d final vs v35 [95% CI]          d final vs cnn:2 [95% CI]
+   cnn:2,f5:1                                  0.8843    0.8843 +0.0112 [+0.0022,+0.0208]       +0.0003 [-0.0005,+0.0011]
+   cnn:2,t5:0.5                                0.8845    0.8844 +0.0114 [+0.0024,+0.0210]       +0.0004 [-0.0003,+0.0013]
+   cnn:2,t5:1                                  0.8849    0.8848 +0.0117 [+0.0027,+0.0214]       +0.0008 [-0.0002,+0.0020]
+   cnn:2,t5:2                                  0.8874    0.8872 +0.0141 [+0.0045,+0.0245]       +0.0032 [+0.0002,+0.0070]
+   cnn:2,t5~:1                                 0.8848    0.8848 +0.0117 [+0.0022,+0.0224]       +0.0008 [-0.0048,+0.0064]
+   cnn:2,t5:1,@perm=t5                         0.8780    0.8779 +0.0048 [-0.0048,+0.0153]       -0.0061 [-0.0147,+0.0019]
+   cnn:2,e2:1                                  0.8840    0.8839 +0.0108 [+0.0019,+0.0204]       -0.0001 [-0.0007,+0.0006]
+   cnn:2,t2:1                                  0.8852    0.8850 +0.0120 [+0.0031,+0.0218]       +0.0010 [-0.0005,+0.0032]
+== p36b_0 (hbqry, 400 queries, 84837 candidates) f5: dot missing bits 0; t5: tan missing bits 0; e2: dot missing bits 0; t2: tan missing bits 0
+   config                                    pool MRR final MRR      d final vs v35 [95% CI]          d final vs cnn:2 [95% CI]
+   cnn:2,f5:1                                  0.8123    0.8092 +0.0281 [+0.0156,+0.0414]       +0.0069 [+0.0017,+0.0136]
+   cnn:2,t5:0.5                                0.8122    0.8079 +0.0268 [+0.0147,+0.0397]       +0.0056 [+0.0015,+0.0107]
+   cnn:2,t5:1                                  0.8139    0.8098 +0.0288 [+0.0156,+0.0431]       +0.0075 [-0.0010,+0.0173]
+   cnn:2,t5:2                                  0.8143    0.8103 +0.0292 [+0.0127,+0.0462]       +0.0080 [-0.0039,+0.0208]
+   cnn:2,t5~:1                                 0.8015    0.7953 +0.0143 [+0.0018,+0.0268]       -0.0070 [-0.0158,+0.0017]
+   cnn:2,t5:1,@perm=t5                         0.7874    0.7824 +0.0013 [-0.0118,+0.0144]       -0.0199 [-0.0323,-0.0078]
+   cnn:2,e2:1                                  0.8104    0.8062 +0.0251 [+0.0134,+0.0377]       +0.0039 [-0.0010,+0.0094]
+   cnn:2,t2:1                                  0.8128    0.8084 +0.0273 [+0.0139,+0.0405]       +0.0061 [-0.0013,+0.0143]
+Traceback (most recent call last):
+  File "C:\prog\claude4\arc\arc3\casmi\py\pool38.py", line 209, in <module>
+    main()
+    ~~~~^^
+  File "C:\prog\claude4\arc\arc3\casmi\py\pool38.py", line 144, in main
+    C[name], miss = model_col(cf, order, qnames, kind, molp, bitspec, 0)
+                    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\prog\claude4\arc\arc3\casmi\py\pool38.py", line 71, in model_col
+    Pm = load_mol(molp)
+  File "C:\prog\claude4\arc\arc3\casmi\py\pool38.py", line 65, in load_mol
+    P[mol] = np.frombuffer(raw, dtype="<f4", count=nb, offset=off).astype(np.float64)
+             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: buffer is smaller than requested size

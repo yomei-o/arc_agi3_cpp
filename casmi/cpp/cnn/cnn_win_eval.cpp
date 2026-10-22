@@ -218,6 +218,39 @@ int main(int argc, char** argv) {
   float popW = float(std::atof(get("popw", "0.15").c_str()));
   parallel_cap() = unsigned(std::atoi(get("threads", "8").c_str()));
   Store q = loadSpectra(dir, qry);
+  if (!get("molout", "").empty()) {
+    // molout=<prefix> (models38): per CNN model in models= write <dir>/<prefix>_<qry>_mol.bin = logit of the mean p over the
+    // molecule's spectra (pt_train mollogits format: i32 nmol, i32 nbits, per molecule i32 mol + f32[nbits]); no window needed.
+    // Several models: "<prefix>" gets the model index appended after the first ("<prefix>1", ...).
+    std::stringstream ms(get("models", ""));
+    std::string it;
+    int k = 0;
+    while (std::getline(ms, it, ',')) {
+      std::string path = it.substr(0, it.find(':'));
+      cnn::Model cm;
+      if (!cnn::Model::isCnnFile(dir + "/" + path) || !cm.load(dir + "/" + path)) { std::fprintf(stderr, "cannot load %s\n", path.c_str()); return 1; }
+      auto t0 = std::chrono::steady_clock::now();
+      auto P = predictByMolCnn(cm, q);
+      std::string out = dir + "/" + get("molout", "") + (k ? std::to_string(k) : std::string()) + "_" + qry + "_mol.bin";
+      FILE* f = std::fopen(out.c_str(), "wb");
+      if (!f) { std::fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
+      int32_t nm = 0, nb = cm.NB;
+      for (auto& v : P) nm += !v.empty();
+      std::fwrite(&nm, 4, 1, f); std::fwrite(&nb, 4, 1, f);
+      std::vector<float> z(nb);
+      for (size_t m = 0; m < P.size(); ++m) {
+        if (P[m].empty()) continue;
+        int32_t mi = int32_t(m);
+        for (int b = 0; b < nb; ++b) { double p = std::min(1.0 - 1e-7, std::max(1e-7, double(P[m][b]))); z[b] = float(std::log(p / (1.0 - p))); }
+        std::fwrite(&mi, 4, 1, f); std::fwrite(z.data(), 4, nb, f);
+      }
+      std::fclose(f);
+      std::printf("molout %s: %d molecules x %d bits, %.1fs\n", out.c_str(), nm, nb,
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+      ++k;
+    }
+    return 0;
+  }
   auto wins = loadWin(dir + "/" + win + "_win.bin");
   std::vector<float> pop;
   {
