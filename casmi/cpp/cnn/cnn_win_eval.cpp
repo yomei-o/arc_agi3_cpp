@@ -243,7 +243,23 @@ int main(int argc, char** argv) {
     ModelInfo m;
     std::vector<std::vector<float>> P;
     auto t0 = std::chrono::steady_clock::now();
-    if (cnn::Model::isCnnFile(dir + "/" + path)) {
+    const bool isMol = path.size() > 8 && path.compare(path.size() - 8, 8, "_mol.bin") == 0;
+    if (isMol) {
+      // "<x>_mol.bin" = per-molecule logits (fpnet_ggml / pt_train mollogits format: i32 nmol, i32 nbits,
+      // per molecule i32 mol + f32[nbits]); p = sigmoid(logit), no calibration (as rev3/win_eval)
+      auto b = slurp(dir + "/" + path);
+      int32_t nm, nb; std::memcpy(&nm, b.data(), 4); std::memcpy(&nb, b.data() + 4, 4);
+      m.NB = nb; m.kind = "mol logits";
+      P.assign(q.nMol, {});
+      const char* r = b.data() + 8;
+      for (int i = 0; i < nm; ++i) {
+        int32_t mol; std::memcpy(&mol, r, 4); r += 4;
+        const float* z = reinterpret_cast<const float*>(r); r += 4 * size_t(nb);
+        if (mol < 0 || size_t(mol) >= P.size()) continue;
+        P[mol].resize(nb);
+        for (int k = 0; k < nb; ++k) P[mol][k] = 1.f / (1.f + std::exp(-z[k]));
+      }
+    } else if (cnn::Model::isCnnFile(dir + "/" + path)) {
       cnn::Model cm;
       if (!cm.load(dir + "/" + path)) { std::fprintf(stderr, "cannot load %s\n", path.c_str()); return 1; }
       m.NB = cm.NB; m.calA = cm.calA; m.calC = cm.calC; m.quality = cm.quality; m.H = cm.cfg.chans; m.kind = "CNN chans";
@@ -308,9 +324,20 @@ int main(int argc, char** argv) {
     }
   }
   const size_t nBase = all.size();
-  for (auto& w : wsets) {
+  // shufm=i: for every weight set also an ensemble whose member i alone uses the shuffled-query scores
+  // (query q scored with query q+shift's predictions) = control for "what does member i add"
+  const int shufm = std::atoi(get("shufm", "-1").c_str());
+  for (size_t wi = 0, nw = wsets.size(); wi < nw; ++wi) {
+    if (shufm < 0 || size_t(shufm) >= nBase || wsets[wi][shufm] == 0.f) continue;
+    std::vector<float> w = wsets[wi];
+    w.push_back(-1.f);  // marker: member shufm shuffled
+    wsets.push_back(w);
+  }
+  for (auto& wm : wsets) {
+    const bool shufOne = wm.size() == nBase + 1;
+    std::vector<float> w(wm.begin(), wm.begin() + nBase);
     MS e;
-    e.name = "ENSEMBLE(z-sum w=";
+    e.name = shufOne ? "ENSEMBLE-SHUFm" + std::to_string(shufm) + "(z-sum w=" : "ENSEMBLE(z-sum w=";
     for (size_t i = 0; i < w.size(); ++i) e.name += (i ? "," : "") + std::to_string(w[i]).substr(0, 4);
     e.name += ")";
     e.s.assign(NV, std::vector<std::vector<float>>(nQ));
@@ -321,7 +348,8 @@ int main(int argc, char** argv) {
           auto& d = pass ? e.sh[v][qi] : e.s[v][qi];
           d.assign(wins[qi].ids.size(), 0.f);
           for (size_t mi = 0; mi < nBase; ++mi) {
-            auto x = pass ? all[mi].sh[v][qi] : all[mi].s[v][qi];
+            const bool useSh = pass || (shufOne && int(mi) == shufm);
+            auto x = useSh ? all[mi].sh[v][qi] : all[mi].s[v][qi];
             zs(x);
             for (size_t k = 0; k < d.size(); ++k) d[k] += w[mi] * x[k];
           }

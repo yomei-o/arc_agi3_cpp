@@ -1,0 +1,22 @@
+--- cpp/rdkit-min/phys_v36pc.cpp
++++ phys_v36gs.cpp
+@@ -2644,6 +2644,9 @@
+   // v36pc cfdump=file: every candidate "name idx score isPool pop candname cnn att fp3" (offline pool-fusion grids)
+   std::ofstream cfdump;
+   if (opt.count("cfdump")) cfdump.open(dir + "/" + opt["cfdump"]);
++  // v36gs gsdump=file: every candidate "name idx candname smiles" (generated candidates' SMILES for offline terms)
++  std::ofstream gsdump;
++  if (opt.count("gsdump")) gsdump.open(dir + "/" + opt["gsdump"]);
+   for (size_t qi = 0; qi < Q.size(); ++qi) {
+     Query& q = Q[qi];
+     std::vector<int> o(q.cand.size());
+@@ -2664,6 +2667,9 @@
+                << (i < q.cnnPc.size() ? q.cnnPc[i] : 0.f) << '\t' << (i < q.attPc.size() ? q.attPc[i] : 0.f) << '\t'
+                << (i < q.revPc.size() ? q.revPc[i] : 0.f) << '\n';
+       }
++    if (gsdump.is_open())
++      for (size_t i = 0; i < q.cand.size(); ++i)
++        gsdump << q.name << '\t' << i << '\t' << candName(q, i) << '\t' << candSmiles(q, i) << '\n';
+     if (ppdet.is_open() && scores[qi].size() == q.cand.size())
+       for (size_t r = 0; r < o.size() && int(r) < std::max(ppN, 25); ++r) {
+         int c = q.cand[o[r]];
