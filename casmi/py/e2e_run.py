@@ -20,24 +20,52 @@ from pathlib import Path
 E2E = Path(r"C:\prog\casmi\e2e"); INP = E2E / "input"; WORK = Path(os.environ.get("E2E_WORK", str(E2E / "work"))); CAS = Path(r"C:\prog\casmi")
 DS = CAS / "ds_rdkit"
 os.environ["PATH"] = r"C:\prog\w64devkit\bin;" + os.environ["PATH"]
-ctypes.windll.kernel32.SetProcessAffinityMask(ctypes.windll.kernel32.GetCurrentProcess(), 0xF0)
+ctypes.windll.kernel32.SetProcessAffinityMask(ctypes.windll.kernel32.GetCurrentProcess(), int(os.environ.get("E2E_MASK", "0xF0"), 16))
 nbpath = Path(sys.argv[1]); stage = sys.argv[2] if len(sys.argv) > 2 else "all"
 WORK.mkdir(parents=True, exist_ok=True)
 
 
 def link(src, dst):
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink() and Path(os.readlink(dst)) != Path(src):  # v36: re-point overridden models
+        dst.unlink()
     if not dst.exists():
         os.symlink(src, dst)
 
 
 OVR = {Path("rdkit-min/fwd_mlp_rank_v2.bin"): CAS / "fwd_mlp_rank_ylib.bin",
-       Path("pool730/rev2_all_v4k.bin"): CAS / "rev2_z.bin"}
+       Path("pool730/rev2_all_v4k.bin"): CAS / "rev2_z.bin",
+       # v36 (v36_STATUS.md): holdout-safe substitutes for the new production models
+       Path("pool730/rev3_all_fp3c16k_big.bin"): CAS / "rev3_fp3c16k_big.bin"}   # fp3 trained on wlib
+EXTRA = {Path("pool730/cnn_prod_c.bin"): CAS / "cnn_a_c.bin",                    # CNN trained on wlib
+         Path("fpnet/fpnet_own_f16.bin"): CAS / "fpown" / "fpown_w_f16.bin",       # own FPNet trained on wlib
+         Path("rdkit-min/phys_v36pc.cpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "phys_v36pc.cpp",
+         Path("rdkit-min/rev/cnn_model.hpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "rev" / "cnn_model.hpp",
+         Path("rdkit-min/rev/cnn_layers.hpp"): CAS / "v36" / "ds_add" / "rdkit-min" / "rev" / "cnn_layers.hpp"}
+import shutil
 for p in DS.rglob("*"):
     rel = p.relative_to(DS)
-    if rel.parts[0] == "fpnet" or not p.is_file():
+    if not p.is_file():
+        continue
+    if rel.parts[0] == "fpnet":   # sources copied (cmake), weights never: the public fpnet_full1 is left out
+        if p.suffix != ".bin" and not (INP / "rdkitmin" / rel).exists():
+            (INP / "rdkitmin" / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(p, INP / "rdkitmin" / rel)
         continue
     link(OVR.get(rel, p), INP / "rdkitmin" / rel)
+for rel, src in EXTRA.items():   # copies, not links: g++ resolves "" includes next to the resolved path
+    if src.exists():
+        dst = INP / "rdkitmin" / rel
+        if dst.is_symlink():
+            dst.unlink()
+        if src.suffix in (".cpp", ".hpp", ".h"):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+        else:
+            link(src, dst)
+for n in ("pool730_fp10226.bin", "pool730_fp10226.bin.ok"):
+    link(CAS / "ds_fpnet_pool" / n, INP / "fpnetpool" / n)
+os.environ.setdefault("FPNET_LOCAL_DIR", str(WORK))   # the notebook's local copy of the pool fp file (Kaggle: /tmp)
 for p in (CAS / "pcds").glob("pc_*.bin"):
     link(p, INP / "pubchem" / p.name)
 (INP / "poolx").mkdir(parents=True, exist_ok=True)
@@ -79,7 +107,16 @@ def gpp(cmd, cwd=None, **kw):
     return r
 
 
-subprocess.run = lambda cmd, *a, **kw: gpp(cmd, **kw) if isinstance(cmd, list) and cmd and cmd[0] == "g++" else _run(cmd, *a, **kw)
+def cmk(cmd, *a, **kw):
+    # Windows: MSVC + Ninja for the fpnet cmake (the .bat runs vcvars64 first); Kaggle uses its default gcc/make
+    if "-S" in cmd:
+        cmd = list(cmd) + ["-G", "Ninja", "-DCMAKE_C_COMPILER=cl", "-DCMAKE_CXX_COMPILER=cl"]
+    return _run(cmd, *a, **kw)
+
+
+subprocess.run = lambda cmd, *a, **kw: (gpp(cmd, **kw) if isinstance(cmd, list) and cmd and cmd[0] == "g++" else
+                                        cmk(cmd, *a, **kw) if isinstance(cmd, list) and cmd and cmd[0] == "cmake" else
+                                        _run(cmd, *a, **kw))
 
 if stage in ("all", "nb"):
     nb = json.load(open(nbpath, encoding="utf-8"))

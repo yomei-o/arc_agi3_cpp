@@ -1,4 +1,4 @@
-// phys_v36pc: phys_v35pc + cnnmodel=/cnnpool=/cnnshuf=/cfdump= (pool36_STATUS.md); defaults identical to v35.
+// phys_v36pc: phys_v35pc + cnnmodel=/cnnpool=/cnnshuf=/cnninst=/cfdump= (pool36_STATUS.md, v36_STATUS.md); defaults identical to v35.
 // phys_v35pc: phys_v33pc (Boltzmann merge, alloc=boltz) + phys_v34pc (attention engine, attn=1 / attpool)
 // combined (2026-10-21, v35_STATUS.md). Both derived from phys_v32pc; options independent:
 // no new options = phys_v32pc, alloc=boltz alone = phys_v33pc, attn=... alone = phys_v34pc.
@@ -955,6 +955,7 @@ int main(int argc, char** argv) {
   const std::string cnnPath = opt.count("cnnmodel") ? opt["cnnmodel"] : std::string();
   const float cnnPoolW = float(optF("cnnpool", 0.0));
   const int cnnShuf = optI("cnnshuf", 0);
+  const int cnnInst = optI("cnninst", -1);  // v36: >= 0 -> CNN term only for queries with a spectrum of this instrument (0 timsTOF)
   // v28pc: pool popularity (ppop=w): among the top ppn of the final list, the pool
   // candidates' places are re-filled in the order z(final score) + w * pop
   // (z over those pool candidates); generated candidates keep their places
@@ -1357,6 +1358,7 @@ int main(int argc, char** argv) {
     for (Query& q : Q) {
       const int B = int(q.spectra.size());
       if (B == 0) continue;
+      if (cnnInst >= 0 && std::none_of(q.spectra.begin(), q.spectra.end(), [&](int s) { return head[s].tag >= 0 && head[s].tag % 16 == cnnInst; })) continue;  // cnninst: no p -> no CNN term
       ss.assign(B, cnn::Sample());
       for (int i = 0; i < B; ++i) {
         const Head& h = head[q.spectra[i]];
@@ -1384,6 +1386,7 @@ int main(int argc, char** argv) {
     }
     std::printf("cnn model %s: %d bits (vocab r%d/%d), %zu spectra in %.1fs, cnnpool %g, cnnshuf %d\n", pth.c_str(), cm.NB,
                 cm.rE, cm.rF, nSp, std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count(), cnnPoolW, cnnShuf);
+    if (cnnInst >= 0) std::printf("cnninst %d: CNN term on %zu of %zu queries\n", cnnInst, size_t(std::count_if(Q.begin(), Q.end(), [](const Query& q) { return !q.cnnP.empty(); })), Q.size());
   }
 
   // ---- v32pc: fp3 reverse model (same file format as REV2, fp3 vocabulary) for the PubChem window
