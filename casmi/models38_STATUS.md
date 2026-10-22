@@ -108,6 +108,8 @@ Tanimoto に変えるのは fpnet_pool の出力（p と候補ビット、pool73
 `fpn_watch.bat`（m38_fpn_watch）: 次のエポックのファイルが出たら前のエポックを fpn_eval.bat（tfm2fpnet → fpnet_ggml 2 スレッド、3 集合 ~6 分）で評価、
 12 エポック後に `fpn_grid.bat` → **`C:\prog\casmi\models38\fpn_grid.txt`**（e1..e12 と f5、o1..o4 = 5 エポック版の途中、t = Tanimoto 形、SHUF/PERM 対照、
 基準 = cnn 2 + f5 1）。速度: GPU を FT 第 2 シードと共有して 1 エポック ~39 分 → wlib ~22:50 終了、alllib ~07:00〜08:00 終了の見込み。
+**途中経過（16:30）**: 12 エポック版の ep1（fpown12_w_ep1、評価パイプライン fpn_watch → fpn_eval が通ることを確認）= cnn 2 + e1 1 の cnn 2 + f5 1 との差
++0.0009 / −0.0021 / −0.0000 → 1 エポック目でもう現行 5 エポック版と区別できない（プール項はエポックにほとんど依存しない、上の 5 エポック版の途中と同じ）。
 **選び方**: hx/hb/hbs の「cnn 2 + e<N> 1 vs cnn 2 + f5 1」の差が 3 集合とも ≥ 0 で、合計が最大のエポック N。良ければ本番は
 `fpown12_all_ep<N>_f16.bin`（同じ 12 エポックのスケジュールの N エポック目 = wlib で測ったものと同じ位置）を fpnet_own_f16.bin の代わりに。
 差がノイズ内（±0.003）なら今の fpnet_own_f16.bin のまま。Kaggle の CPU コストは同じ構造なので変わらない（FPNet 段 75 分の上限内、v36_STATUS）。
