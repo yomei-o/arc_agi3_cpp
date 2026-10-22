@@ -85,7 +85,7 @@ enumeration; per-run reuse is not where the time is.**
 | hbqry 4 thr, v38 pccache only, uncapped (b38_fin) | c37b_ft2 | same | same | same | same | same | same |
 | hbqry 4 thr, **final source** (pccachemax 3M, cap reached: 3.0M stored, 433k hits; enumeration 549.1 s, total 814.9 s; b38_c3m) | c37b_ft2 | same | same | same | same | same | same |
 | hasqry 2 thr, v38 both caches (s38_on) vs v37 run today (s37_ft2, bT1 3 / bpi 0.1) | v37\out\s37_ft2 | same | same | same | same | same | - |
-| hasqry 2 thr, final v38, pccachemax=1000000 (cap path, s38_cap) | s37_ft2 | PENDING | | | | | |
+| hasqry 2 thr, v38 exe (= final logic), pccachemax=1000000 (cap path: 1.0M stored, 73k hits; enumeration 865.5 s vs v37 886.2 s; s38_cap) | s37_ft2 | same | same | same | same | same | - |
 MRR (mrr.py) hbqry 0.8129 / 0.8100 in every run = v37.
 
 ## The user's signal-processing suggestions — checked, not used
