@@ -11,6 +11,7 @@ cnn_a_c Tanimoto) + <tag>_det.txt + <qry>_mols.txt. Extra per-candidate columns:
      u16 count + u16 bits), names from the mols file (pool candidates by name, generated ones "<query>:G<k>").
   Paths may contain {q} (query set, e.g. hxqry) and {s} (short set name from the sets argument, e.g. x / b / bs).
   name=avg:<c1>+<c2>[+...]     mean of already defined columns (raw values)
+  name=gmean:<col>             <col> with the generated candidates (isPool 0) set to the query pool mean (production FPNet fill)
 For tan/dot columns a shuffled-query version "<name>~" (query q scored with query q+7's prediction) is made too.
 A candidate without bits gets the query's mean (should not happen: every candidate has bits; counts are printed).
 
@@ -144,6 +145,17 @@ def main():
                 C[name], miss = model_col(cf, order, qnames, kind, molp, bitspec, 0)
                 C[name + "~"], _ = model_col(cf, order, qnames, kind, molp, bitspec, 7)
                 info.append(f"{name}: {kind} missing bits {miss}")
+            elif kind == "gmean":  # name=gmean:<col> : generated candidates (isPool 0) get the query's pool mean (= production phys for FPNet)
+                if rest not in C:
+                    info.append(f"{name}: MISSING column {rest}")
+                    continue
+                src = C[rest]
+                col = {}
+                for q, rows in cf.items():
+                    pv = [v for r, v in zip(rows, src[q]) if r[2] == 1]
+                    mu = sum(pv) / max(1, len(pv))
+                    col[q] = [v if r[2] == 1 else mu for r, v in zip(rows, src[q])]
+                C[name] = col
             elif kind == "avg":
                 parts = rest.split("+")
                 C[name] = {q: [sum(C[p][q][i] for p in parts) / len(parts) for i in range(len(cf[q]))] for q in cf}

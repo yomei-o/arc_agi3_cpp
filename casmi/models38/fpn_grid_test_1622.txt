@@ -1,0 +1,135 @@
+== p36x_0 (hxqry, 400 queries, 80824 candidates) f5: dot missing bits 0; t5: tan missing bits 0; o1: dot missing bits 0; o2: dot missing bits 0; o3: dot missing bits 0; o4: dot missing bits 0; e1: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep1_hxqry_mol.bin; e2: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep2_hxqry_mol.bin; e3: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep3_hxqry_mol.bin; e4: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep4_hxqry_mol.bin; e5: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep5_hxqry_mol.bin; e6: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep6_hxqry_mol.bin; e7: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep7_hxqry_mol.bin; e8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hxqry_mol.bin; e9: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep9_hxqry_mol.bin; e10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hxqry_mol.bin; e11: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep11_hxqry_mol.bin; e12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hxqry_mol.bin; t8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hxqry_mol.bin; t10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hxqry_mol.bin; t12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hxqry_mol.bin; ge8: MISSING column e8; ge10: MISSING column e10; ge12: MISSING column e12; gt12: MISSING column t12
+   config                                    pool MRR final MRR      d final vs v35 [95% CI]     d final vs cnn:2,f5:1 [95% CI]
+   cnn:2                                       0.8840    0.8840 +0.0109 [+0.0020,+0.0207]       -0.0003 [-0.0011,+0.0005]
+   cnn:2,f5:0.5                                0.8844    0.8844 +0.0113 [+0.0022,+0.0210]       +0.0002 [-0.0002,+0.0006]
+   cnn:2,f5:1.5                                0.8844    0.8843 +0.0112 [+0.0022,+0.0209]       +0.0000 [-0.0004,+0.0005]
+   cnn:2,f5~:1                                 0.8841    0.8841 +0.0110 [+0.0016,+0.0210]       -0.0001 [-0.0039,+0.0036]
+   cnn:2,f5:1,@perm=f5                         0.8807    0.8807 +0.0076 [-0.0019,+0.0176]       -0.0036 [-0.0111,+0.0034]
+   cnn:2,t5:1                                  0.8849    0.8848 +0.0117 [+0.0027,+0.0214]       +0.0005 [-0.0001,+0.0013]
+   cnn:2,t5:2                                  0.8874    0.8872 +0.0141 [+0.0045,+0.0245]       +0.0029 [+0.0002,+0.0065]
+   cnn:2,o1:1                                  0.8851    0.8851 +0.0121 [+0.0029,+0.0220]       +0.0009 [-0.0008,+0.0037]
+   cnn:2,o2:1                                  0.8840    0.8839 +0.0108 [+0.0019,+0.0204]       -0.0003 [-0.0008,+0.0000]
+   cnn:2,o3:1                                  0.8840    0.8840 +0.0109 [+0.0020,+0.0205]       -0.0002 [-0.0007,+0.0001]
+   cnn:2,o4:1                                  0.8843    0.8843 +0.0112 [+0.0022,+0.0209]       +0.0000 [+0.0000,+0.0001]
+   cnn:2,e1:1                               skipped (column missing)
+   cnn:2,e2:1                               skipped (column missing)
+   cnn:2,e3:1                               skipped (column missing)
+   cnn:2,e4:1                               skipped (column missing)
+   cnn:2,e5:1                               skipped (column missing)
+   cnn:2,e6:1                               skipped (column missing)
+   cnn:2,e7:1                               skipped (column missing)
+   cnn:2,e8:1                               skipped (column missing)
+   cnn:2,e9:1                               skipped (column missing)
+   cnn:2,e10:1                              skipped (column missing)
+   cnn:2,e11:1                              skipped (column missing)
+   cnn:2,e12:1                              skipped (column missing)
+   cnn:2,e8:0.5                             skipped (column missing)
+   cnn:2,e8:1.5                             skipped (column missing)
+   cnn:2,e10:1.5                            skipped (column missing)
+   cnn:2,e12:0.5                            skipped (column missing)
+   cnn:2,e12:1.5                            skipped (column missing)
+   cnn:2,t8:1                               skipped (column missing)
+   cnn:2,t10:1                              skipped (column missing)
+   cnn:2,t12:1                              skipped (column missing)
+   cnn:2,t12:2                              skipped (column missing)
+   cnn:2,gf5:1                                 0.8908    0.8908 +0.0177 [+0.0078,+0.0286]       +0.0065 [+0.0019,+0.0124]
+   cnn:2,gt5:1                                 0.8918    0.8917 +0.0187 [+0.0086,+0.0296]       +0.0075 [+0.0026,+0.0134]
+   cnn:2,ge8:1                              skipped (column missing)
+   cnn:2,ge10:1                             skipped (column missing)
+   cnn:2,ge12:1                             skipped (column missing)
+   cnn:2,gt12:1                             skipped (column missing)
+   cnn:2,e8~:1                              skipped (column missing)
+   cnn:2,e8:1,@perm=e8                      skipped (column missing)
+   cnn:2,e12~:1                             skipped (column missing)
+   cnn:2,e12:1,@perm=e12                    skipped (column missing)
+   cnn:2,e10~:1                             skipped (column missing)
+== p36b_0 (hbqry, 400 queries, 84837 candidates) f5: dot missing bits 0; t5: tan missing bits 0; o1: dot missing bits 0; o2: dot missing bits 0; o3: dot missing bits 0; o4: dot missing bits 0; e1: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep1_hbqry_mol.bin; e2: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep2_hbqry_mol.bin; e3: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep3_hbqry_mol.bin; e4: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep4_hbqry_mol.bin; e5: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep5_hbqry_mol.bin; e6: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep6_hbqry_mol.bin; e7: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep7_hbqry_mol.bin; e8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hbqry_mol.bin; e9: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep9_hbqry_mol.bin; e10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hbqry_mol.bin; e11: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep11_hbqry_mol.bin; e12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hbqry_mol.bin; t8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hbqry_mol.bin; t10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hbqry_mol.bin; t12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hbqry_mol.bin; ge8: MISSING column e8; ge10: MISSING column e10; ge12: MISSING column e12; gt12: MISSING column t12
+   config                                    pool MRR final MRR      d final vs v35 [95% CI]     d final vs cnn:2,f5:1 [95% CI]
+   cnn:2                                       0.8058    0.8023 +0.0212 [+0.0091,+0.0336]       -0.0069 [-0.0136,-0.0017]
+   cnn:2,f5:0.5                                0.8101    0.8056 +0.0245 [+0.0125,+0.0368]       -0.0036 [-0.0077,-0.0006]
+   cnn:2,f5:1.5                                0.8131    0.8101 +0.0290 [+0.0150,+0.0444]       +0.0009 [-0.0042,+0.0059]
+   cnn:2,f5~:1                                 0.7991    0.7940 +0.0129 [+0.0003,+0.0253]       -0.0152 [-0.0246,-0.0072]
+   cnn:2,f5:1,@perm=f5                         0.7939    0.7892 +0.0082 [-0.0044,+0.0207]       -0.0200 [-0.0327,-0.0078]
+   cnn:2,t5:1                                  0.8139    0.8098 +0.0288 [+0.0156,+0.0431]       +0.0006 [-0.0053,+0.0066]
+   cnn:2,t5:2                                  0.8143    0.8103 +0.0292 [+0.0127,+0.0462]       +0.0011 [-0.0091,+0.0113]
+   cnn:2,o1:1                                  0.8085    0.8037 +0.0226 [+0.0102,+0.0353]       -0.0055 [-0.0117,-0.0001]
+   cnn:2,o2:1                                  0.8104    0.8062 +0.0251 [+0.0134,+0.0377]       -0.0030 [-0.0070,-0.0001]
+   cnn:2,o3:1                                  0.8101    0.8057 +0.0247 [+0.0127,+0.0372]       -0.0035 [-0.0084,-0.0001]
+   cnn:2,o4:1                                  0.8136    0.8106 +0.0296 [+0.0170,+0.0431]       +0.0014 [+0.0000,+0.0041]
+   cnn:2,e1:1                               skipped (column missing)
+   cnn:2,e2:1                               skipped (column missing)
+   cnn:2,e3:1                               skipped (column missing)
+   cnn:2,e4:1                               skipped (column missing)
+   cnn:2,e5:1                               skipped (column missing)
+   cnn:2,e6:1                               skipped (column missing)
+   cnn:2,e7:1                               skipped (column missing)
+   cnn:2,e8:1                               skipped (column missing)
+   cnn:2,e9:1                               skipped (column missing)
+   cnn:2,e10:1                              skipped (column missing)
+   cnn:2,e11:1                              skipped (column missing)
+   cnn:2,e12:1                              skipped (column missing)
+   cnn:2,e8:0.5                             skipped (column missing)
+   cnn:2,e8:1.5                             skipped (column missing)
+   cnn:2,e10:1.5                            skipped (column missing)
+   cnn:2,e12:0.5                            skipped (column missing)
+   cnn:2,e12:1.5                            skipped (column missing)
+   cnn:2,t8:1                               skipped (column missing)
+   cnn:2,t10:1                              skipped (column missing)
+   cnn:2,t12:1                              skipped (column missing)
+   cnn:2,t12:2                              skipped (column missing)
+   cnn:2,gf5:1                                 0.8270    0.8225 +0.0415 [+0.0281,+0.0567]       +0.0133 [+0.0057,+0.0223]
+   cnn:2,gt5:1                                 0.8293    0.8251 +0.0440 [+0.0292,+0.0603]       +0.0158 [+0.0069,+0.0254]
+   cnn:2,ge8:1                              skipped (column missing)
+   cnn:2,ge10:1                             skipped (column missing)
+   cnn:2,ge12:1                             skipped (column missing)
+   cnn:2,gt12:1                             skipped (column missing)
+   cnn:2,e8~:1                              skipped (column missing)
+   cnn:2,e8:1,@perm=e8                      skipped (column missing)
+   cnn:2,e12~:1                             skipped (column missing)
+   cnn:2,e12:1,@perm=e12                    skipped (column missing)
+   cnn:2,e10~:1                             skipped (column missing)
+== p36bs_0 (hbsqry, 400 queries, 89240 candidates) f5: dot missing bits 0; t5: tan missing bits 0; o1: dot missing bits 0; o2: dot missing bits 0; o3: dot missing bits 0; o4: dot missing bits 0; e1: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep1_hbsqry_mol.bin; e2: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep2_hbsqry_mol.bin; e3: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep3_hbsqry_mol.bin; e4: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep4_hbsqry_mol.bin; e5: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep5_hbsqry_mol.bin; e6: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep6_hbsqry_mol.bin; e7: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep7_hbsqry_mol.bin; e8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hbsqry_mol.bin; e9: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep9_hbsqry_mol.bin; e10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hbsqry_mol.bin; e11: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep11_hbsqry_mol.bin; e12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hbsqry_mol.bin; t8: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep8_hbsqry_mol.bin; t10: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep10_hbsqry_mol.bin; t12: MISSING C:\prog\casmi\models38\fpn\fpown12_w_ep12_hbsqry_mol.bin; ge8: MISSING column e8; ge10: MISSING column e10; ge12: MISSING column e12; gt12: MISSING column t12
+   config                                    pool MRR final MRR      d final vs v35 [95% CI]     d final vs cnn:2,f5:1 [95% CI]
+   cnn:2                                       0.8928    0.8906 +0.0126 [+0.0008,+0.0251]       -0.0021 [-0.0067,+0.0021]
+   cnn:2,f5:0.5                                0.8957    0.8936 +0.0155 [+0.0042,+0.0275]       +0.0008 [-0.0008,+0.0037]
+   cnn:2,f5:1.5                                0.8986    0.8969 +0.0188 [+0.0075,+0.0308]       +0.0042 [+0.0004,+0.0092]
+   cnn:2,f5~:1                                 0.8896    0.8888 +0.0107 [+0.0004,+0.0221]       -0.0039 [-0.0086,-0.0006]
+   cnn:2,f5:1,@perm=f5                         0.8929    0.8916 +0.0136 [+0.0022,+0.0255]       -0.0011 [-0.0088,+0.0061]
+   cnn:2,t5:1                                  0.8986    0.8969 +0.0188 [+0.0075,+0.0308]       +0.0042 [+0.0004,+0.0092]
+   cnn:2,t5:2                                  0.9017    0.9000 +0.0220 [+0.0091,+0.0354]       +0.0073 [+0.0002,+0.0156]
+   cnn:2,o1:1                                  0.8965    0.8944 +0.0163 [+0.0051,+0.0283]       +0.0017 [-0.0013,+0.0058]
+   cnn:2,o2:1                                  0.8961    0.8940 +0.0159 [+0.0047,+0.0277]       +0.0013 [-0.0008,+0.0046]
+   cnn:2,o3:1                                  0.8957    0.8936 +0.0155 [+0.0042,+0.0275]       +0.0008 [-0.0008,+0.0037]
+   cnn:2,o4:1                                  0.8969    0.8952 +0.0172 [+0.0059,+0.0289]       +0.0025 [+0.0000,+0.0063]
+   cnn:2,e1:1                               skipped (column missing)
+   cnn:2,e2:1                               skipped (column missing)
+   cnn:2,e3:1                               skipped (column missing)
+   cnn:2,e4:1                               skipped (column missing)
+   cnn:2,e5:1                               skipped (column missing)
+   cnn:2,e6:1                               skipped (column missing)
+   cnn:2,e7:1                               skipped (column missing)
+   cnn:2,e8:1                               skipped (column missing)
+   cnn:2,e9:1                               skipped (column missing)
+   cnn:2,e10:1                              skipped (column missing)
+   cnn:2,e11:1                              skipped (column missing)
+   cnn:2,e12:1                              skipped (column missing)
+   cnn:2,e8:0.5                             skipped (column missing)
+   cnn:2,e8:1.5                             skipped (column missing)
+   cnn:2,e10:1.5                            skipped (column missing)
+   cnn:2,e12:0.5                            skipped (column missing)
+   cnn:2,e12:1.5                            skipped (column missing)
+   cnn:2,t8:1                               skipped (column missing)
+   cnn:2,t10:1                              skipped (column missing)
+   cnn:2,t12:1                              skipped (column missing)
+   cnn:2,t12:2                              skipped (column missing)
+   cnn:2,gf5:1                                 0.9055    0.9055 +0.0274 [+0.0143,+0.0418]       +0.0128 [+0.0053,+0.0212]
+   cnn:2,gt5:1                                 0.9090    0.9090 +0.0310 [+0.0173,+0.0456]       +0.0163 [+0.0079,+0.0255]
+   cnn:2,ge8:1                              skipped (column missing)
+   cnn:2,ge10:1                             skipped (column missing)
+   cnn:2,ge12:1                             skipped (column missing)
+   cnn:2,gt12:1                             skipped (column missing)
+   cnn:2,e8~:1                              skipped (column missing)
+   cnn:2,e8:1,@perm=e8                      skipped (column missing)
+   cnn:2,e12~:1                             skipped (column missing)
+   cnn:2,e12:1,@perm=e12                    skipped (column missing)
+   cnn:2,e10~:1                             skipped (column missing)
