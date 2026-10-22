@@ -207,7 +207,7 @@ final リスト MRR@25、v35 との差 / **pool36 の cnn 2 との差 [95% CI]**
 `cpp/pretrain/prod_pt.bat`（launch 名 **pt_prod**、pid 18728、09:30 起動、ft8s の "all done" 待ち、最大 6 時間）:
 (a) alllib で masked-peak 事前学習（wlib と同じ設定、10 エポック、`pt_train_prod.exe`）→ `C:\prog\casmi\pt_all.bin`（+ pt_all_ep*.bin、pt_all_ck.bin）、
 (b) export + alllib で fp3c16k 微調整 8 エポック（ft8 と同じ）→ **`C:\prog\casmi\ft_all_ep<N>.bin`**（ep5 を使う、8.1）、`ft_all.bin` = ep8。
-見込み: 事前学習 10 エポック ≈ 単独 GPU で ~25 分/エポック（夜は共有で 30–35 分）→ ~4 時間、微調整 ~85 分 → ft8s 終了（~12:05）+ ~5.5 時間 = **~17:30–18:30 完了**。
+見込み → 実測: 12:05 に開始、事前学習は GPU 単独で 140k tok/s = 18,847 step/エポックが ~9 分 → 10 エポック ~1.5 時間（~13:35）、微調整 8 エポック ~1.5 時間 → **~15:00–15:30 完了**。
 進行 `type C:\prog\casmi\pretrain\prod_progress.txt`、ログ `pretrain\prod_pt.log`、`prod_ft.log`、`night\pt_prod.log`。生存確認
 `powershell -c "Get-Process -Id 18728"`、止めるとき `taskkill /pid 18728 /t /f`（自分の PID だけ）。再実行で事前学習は pt_all_ck.bin から再開。
 
@@ -218,8 +218,18 @@ final リスト MRR@25、v35 との差 / **pool36 の cnn 2 との差 [95% CI]**
 候補側は fp3c16k ビット（fp3_prep、プール 12 万分子で 12 s / 2 スレッド）と Tanimoto の内積だけ。モデルファイル 221 MB（fp32; fp16 なら 111 MB）。
 高速化の余地: エンコーダの GEMM を Eigen/ブロック化に（素朴ループ）、ヘッド 2048 × 16384 はプール候補に現れるビットだけ計算すれば数分の 1。
 
-### 8.6 ゼロから 8 エポック（ft8s）の結果
-（追記予定）
+### 8.6 ゼロから 8 エポック（ft8s）の結果 = 事前学習の価値（同じ 8 エポック、同じ構成・ハイパーパラメータ）
+窓 MRR_in（Tanimoto; 表 `casmi/pool37ft/window_ft8s.txt`）、held-out BCE（最小 ep3 825.4 vs 事前学習あり 791.3）:
+| | hcqry FT | hxqry FT | haqry FT | hc CNN+FT | hx CNN+FT | ha MLP+CNN+FT |
+|---|---|---|---|---|---|---|
+| scratch ep4 / 事前学習 ep4 | 0.303 / 0.326 | 0.580 / 0.634 | 0.308 / 0.317 | 0.371 / 0.382 | 0.648 / 0.678 | 0.343 / 0.346 |
+| scratch ep5 / 事前学習 ep5 | 0.319 / 0.339 | 0.616 / 0.659 | 0.304 / 0.319 | 0.370 / 0.380 | 0.674 / 0.697 | 0.347 / 0.355 |
+| scratch ep8 / 事前学習 ep8 | 0.337 / 0.347 | 0.644 / 0.680 | 0.310 / 0.300 | 0.372 / 0.377 | 0.695 / 0.716 | 0.349 / 0.357 |
+プール（final、pool36 の cnn 2 との差、ゼロから ep8; `pool37ft/gridf_s8.txt`）: ft 3 単独 hx +0.0111 / hb +0.0161 / hbs +0.0152 vs v35
+（事前学習 ep5: +0.0146 / +0.0218 / +0.0219）、cnn 2 + ft 2 は cnn 2 に対して +0.0043 / +0.0015 / +0.0087（事前学習 ep5: +0.0065 / +0.0077 / +0.0069）。
+読み方: **利得の大部分はトランスフォーマー（ピーク集合の注意）という構造そのもの**で、ゼロから 8 エポックでも MLP・CNN を単独で超える（hx 0.644）。
+事前学習は同じ微調整予算で **+0.01〜0.04（hx +0.036〜0.054、hc +0.01〜0.02）**、haqry は ep5 まで上・ep8 で逆転（ノイズ程度）、
+プールでも事前学習ありのほうが一貫して少し強い。事前学習のコストは単独 GPU で ~1.5 時間（alllib）なので本番は事前学習ありで進める。
 
 ### 8.7 再開メモ
 1. pt_prod の完了を確認（`prod_progress.txt` に "finetune rc=0" と "all done"）。`ft_all_ep5.bin` を本番モデルに。
