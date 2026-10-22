@@ -1,0 +1,68 @@
+loaded hxqry 400, hbqry 400, hbsqry 400; report sets ['hasqry', 'hcqry']; fold sizes [574, 626]
+v37 weights: yardstick 0.8788 (f0 0.8760 f1 0.8803); hxqry 0.8942 hbqry 0.8270 hbsqry 0.9153
+[both] start: f0 0.8760 f1 0.8803 all 0.8788
+[both] sweep 0 fp: 1.0 -> 2  f0 0.8792 (+0.0032) f1 0.8819 (+0.0016) all 0.8812
+[both] sweep 0 cnn: 2.0 -> 1.5  f0 0.8798 (+0.0006) f1 0.8825 (+0.0006) all 0.8818
+[both] sweep 0 phys: 1.0 -> 2  f0 0.8823 (+0.0024) f1 0.8845 (+0.0020) all 0.8840
+[both] sweep 0 mlp: 0.25 -> 1  f0 0.8826 (+0.0004) f1 0.8855 (+0.0010) all 0.8847
+[both] sweep 0 rev: 1.0 -> 0.5  f0 0.8842 (+0.0016) f1 0.8863 (+0.0008) all 0.8858
+[both] sweep 0 lib32: 8.0 -> 0  f0 0.8873 (+0.0031) f1 0.8902 (+0.0039) all 0.8894
+[both] sweep 0 ana: 24.0 -> 0  f0 0.9123 (+0.0250) f1 0.9085 (+0.0183) all 0.9107
+[both] sweep 0 ppop: 0.15 -> 0.05  f0 0.9132 (+0.0009) f1 0.9106 (+0.0021) all 0.9123
+[both] sweep 1 fp: 2 -> 0.75  f0 0.9141 (+0.0009) f1 0.9139 (+0.0033) all 0.9146
+[both] sweep 1 phys: 2 -> 1  f0 0.9163 (+0.0022) f1 0.9160 (+0.0021) all 0.9168
+[both] sweep 2 att: 2.0 -> 2.5  f0 0.9170 (+0.0007) f1 0.9166 (+0.0006) all 0.9174
+[both] sweep 2 g5: 1.5 -> 3  f0 0.9170 (+0.0000) f1 0.9177 (+0.0011) all 0.9180
+[fit f0] start: f0 0.8760 f1 0.8803 all 0.8788
+[fit f0] sweep 0 fp: 1.0 -> 2  f0 0.8792 (+0.0032) f1 0.8819 (+0.0016) all 0.8812
+[fit f0] sweep 0 cnn: 2.0 -> 1.5  f0 0.8798 (+0.0006) f1 0.8825 (+0.0006) all 0.8818
+[fit f0] sweep 0 phys: 1.0 -> 2  f0 0.8823 (+0.0024) f1 0.8845 (+0.0020) all 0.8840
+[fit f0] sweep 0 mlp: 0.25 -> 0.75  f0 0.8834 (+0.0011) f1 0.8846 (+0.0001) all 0.8847
+[fit f0] sweep 0 rev: 1.0 -> 0  f0 0.8843 (+0.0009) f1 0.8847 (+0.0000) all 0.8851
+[fit f0] sweep 0 lib32: 8.0 -> 0  f0 0.8873 (+0.0030) f1 0.8874 (+0.0027) all 0.8880
+[fit f0] sweep 0 ana: 24.0 -> 0  f0 0.9103 (+0.0230) f1 0.9091 (+0.0218) all 0.9100
+[fit f0] sweep 0 ppop: 0.15 -> 0.1  f0 0.9119 (+0.0016) f1 0.9091 (+0.0000) all 0.9108
+[fit f0] sweep 1 fp: 2 -> 0.75  f0 0.9135 (+0.0015) f1 0.9122 (+0.0031) all 0.9134
+[fit f0] sweep 1 cnn: 1.5 -> 0.5  f0 0.9145 (+0.0011) f1 0.9102 (-0.0020) all 0.9128
+[fit f0] sweep 1 phys: 2 -> 1  f0 0.9167 (+0.0021) f1 0.9116 (+0.0014) all 0.9147
+[fit f0] sweep 2 fp: 0.75 -> 1  f0 0.9178 (+0.0011) f1 0.9117 (+0.0001) all 0.9153
+[fit f1] start: f0 0.8760 f1 0.8803 all 0.8788
+[fit f1] sweep 0 fp: 1.0 -> 2  f0 0.8792 (+0.0032) f1 0.8819 (+0.0016) all 0.8812
+[fit f1] sweep 0 cnn: 2.0 -> 4  f0 0.8758 (-0.0034) f1 0.8843 (+0.0024) all 0.8808
+[fit f1] sweep 0 ft: 2.0 -> 1  f0 0.8756 (-0.0001) f1 0.8855 (+0.0012) all 0.8813
+[fit f1] sweep 0 phys: 1.0 -> 2  f0 0.8776 (+0.0020) f1 0.8896 (+0.0041) all 0.8844
+[fit f1] sweep 0 mlp: 0.25 -> 1  f0 0.8791 (+0.0014) f1 0.8903 (+0.0006) all 0.8853
+[fit f1] sweep 0 rev: 1.0 -> 1.5  f0 0.8770 (-0.0021) f1 0.8920 (+0.0017) all 0.8852
+[fit f1] sweep 0 lib32: 8.0 -> 0  f0 0.8842 (+0.0072) f1 0.8983 (+0.0063) all 0.8921
+[fit f1] sweep 0 ana: 24.0 -> 0  f0 0.9010 (+0.0168) f1 0.9105 (+0.0122) all 0.9061
+[fit f1] sweep 0 ppop: 0.15 -> 0  f0 0.9049 (+0.0039) f1 0.9135 (+0.0030) all 0.9096
+[fit f1] sweep 0 g5: 1.5 -> 3  f0 0.9055 (+0.0006) f1 0.9147 (+0.0012) all 0.9105
+[fit f1] sweep 1 cnn: 4 -> 2.5  f0 0.9096 (+0.0041) f1 0.9166 (+0.0019) all 0.9135
+[fit f1] sweep 1 phys: 2 -> 1  f0 0.9092 (-0.0004) f1 0.9179 (+0.0013) all 0.9140
+[fit f1] sweep 2 fp: 2 -> 1.25  f0 0.9081 (-0.0011) f1 0.9201 (+0.0022) all 0.9147
+cross-fit: fit f0 -> f1 0.9117 (+0.0314) | fit f1 -> f0 0.9081 (+0.0321) | out-of-fold mean gain +0.0318
+[random-label] start: f0 0.0236 f1 0.0294 all 0.0264
+[random-label] sweep 0 ft: 2.0 -> 0  f0 0.0254 (+0.0018) f1 0.0318 (+0.0024) all 0.0285
+[random-label] sweep 0 att: 2.0 -> 0  f0 0.0291 (+0.0037) f1 0.0335 (+0.0017) all 0.0311
+[random-label] sweep 0 phys: 1.0 -> 0.5  f0 0.0305 (+0.0014) f1 0.0360 (+0.0025) all 0.0330
+[random-label] sweep 0 mlp: 0.25 -> 0  f0 0.0308 (+0.0003) f1 0.0368 (+0.0008) all 0.0336
+[random-label] sweep 0 ana: 24.0 -> 0  f0 0.0378 (+0.0071) f1 0.0428 (+0.0060) all 0.0400
+[random-label] sweep 1 fp: 1.0 -> 0  f0 0.0388 (+0.0010) f1 0.0440 (+0.0012) all 0.0412
+[random-label] sweep 1 rev: 1.0 -> 0.5  f0 0.0392 (+0.0003) f1 0.0447 (+0.0007) all 0.0417
+[random-label] sweep 1 ppop: 0.15 -> 0  f0 0.0396 (+0.0005) f1 0.0454 (+0.0008) all 0.0423
+[random-label] sweep 1 g4: 0.0 -> 1  f0 0.0406 (+0.0010) f1 0.0464 (+0.0009) all 0.0432
+random-label control: v37 0.0264; CD on random labels finds +0.0168 (f0 +0.0170 f1 +0.0169); the tuned config on random labels +0.0011
+
+final: tuned (both-halves) vs v37, paired bootstrap 2000
+  hxqry   v37 0.8942 tuned 0.9330 d +0.0388 [+0.0229, +0.0544]  f0 +0.0398 f1 +0.0380  better 39 worse 8
+  hbqry   v37 0.8270 tuned 0.8769 d +0.0499 [+0.0342, +0.0666]  f0 +0.0534 f1 +0.0462  better 56 worse 8
+  hbsqry  v37 0.9153 tuned 0.9442 d +0.0289 [+0.0128, +0.0448]  f0 +0.0299 f1 +0.0279  better 34 worse 6
+  hasqry  v37 0.8430 tuned 0.7947 d -0.0483 [-0.0694, -0.0303]  f0 -0.0334 f1 -0.0628  better 10 worse 47
+  hcqry   v37 0.5493 tuned 0.5543 d +0.0050 [-0.0144, +0.0247]  f0 +0.0001 f1 +0.0103  better 68 worse 66
+tuned weights: {"phys": 1, "mlp": 1, "rev": 0.5, "att": 2.5, "cnn": 1.5, "ft": 2.0, "lib32": 0, "ana": 0, "g0": -2.0, "g1": 0.0, "g2": -1.0, "g3": 4.0, "g4": 0.0, "g5": 3, "fp": 0.75, "ppop": 0.05, "T1": 3.0, "T2": 0.5, "pi": 0.1, "a": 0.5}
+changed: mlp 0.25 -> 1, rev 1.0 -> 0.5, att 2.0 -> 2.5, cnn 2.0 -> 1.5, lib32 8.0 -> 0, ana 24.0 -> 0, g5 1.5 -> 3, fp 1.0 -> 0.75, ppop 0.15 -> 0.05
+phys_v37pc arguments: {'mlp': '1', 'rev': '0.5', 'lib': '0', 'ana': '0', 'wf': '0.75', 'opts': 'gw=-2:0:-1:4:0:3,attpool=2.5,cnnpool=1.5,ftpool=2,ppop=0.05,bT1=3'}
+cross-fit weights f0: mlp 0.75, rev 0, cnn 0.5, lib32 0, ana 0, ppop 0.1
+cross-fit weights f1: mlp 1, rev 1.5, cnn 2.5, ft 1, lib32 0, ana 0, g5 3, fp 1.25, ppop 0
+random-label weights: phys 0.5, mlp 0, rev 0.5, att 0, ft 0, ana 0, g4 1, fp 0, ppop 0
+time 121s
