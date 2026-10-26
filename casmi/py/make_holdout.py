@@ -49,6 +49,12 @@ PREFIX = "lib" if MODE == "sibling" else "dlib"
 QPREFIX = "qry" if MODE == "sibling" else "dqry"
 N_MOL = 400
 MZ_LO, MZ_HI = 245.0, 461.0
+# --mz LO,HI overrides the timsTOF query precursor range (hnqry, 2026-10-26: the
+# enveda-np-examples molecules at every mass; default reproduces older holdouts)
+for _a in sys.argv[1:]:
+    if _a.startswith("--mz"):
+        MZ_LO, MZ_HI = (float(x) for x in (_a.split("=", 1)[1] if "=" in _a
+                                            else sys.argv[sys.argv.index(_a) + 1]).split(","))
 RNG = np.random.default_rng(12345)
 
 
