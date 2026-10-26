@@ -4,11 +4,14 @@
 // 10226-bit fingerprint row (np.packbits order) from pool730_fp10226.bin (row = line of <pool>_mols.txt).
 // Only the needed fingerprint rows are read (seek), not the whole 933 MB file.
 // Build: g++ -O2 -std=c++17 -o fpnet_pool fpnet_pool.cpp
-// usage: fpnet_pool <dir> <qry_stem> <mol_logits.bin> <pool_stem> <pool_fp.bin> <ppm> <out.txt>
+// usage: fpnet_pool <dir> <qry_stem> <mol_logits.bin> <pool_stem> <pool_fp.bin> <ppm> <out.txt> [dot|tan]
+//   dot (default): cand_fp . logits.  tan: continuous Tanimoto sum_{b in cand} p_b / (|cand| + sum p - sum_{b in cand} p_b),
+//   p = sigmoid(logits), the same form as the CNN/FT pool terms (models38_STATUS: +0.005..0.01 over dot on the timsTOF holdouts).
 //   writes "<molecule_id>\t<pool name>\t<score>" per (query, candidate); candidates whose fingerprint
 //   could not be computed (<pool_fp.bin>.ok byte 0) are skipped (phys_fp gives them the query mean).
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +53,7 @@ int main(int argc, char** argv) {
   if (argc < 8) { fprintf(stderr, "usage: fpnet_pool dir qry_stem mol_logits.bin pool_stem pool_fp.bin ppm out.txt\n"); return 1; }
   std::string dir = argv[1], qs = argv[2], logp = argv[3], ps = argv[4], fpp = argv[5], outp = argv[7];
   float ppm = (float)atof(argv[6]);
+  const bool tan = argc > 8 && strcmp(argv[8], "tan") == 0;
   auto t0 = std::chrono::steady_clock::now();
   struct Head { float prec; int32_t mol, off, n, tag; };
   std::vector<char> hb = slurp(dir + "/" + qs + "_head.bin");
@@ -71,12 +75,20 @@ int main(int argc, char** argv) {
   FILE* fo = fopen(outp.c_str(), "w");
   if (!fo) { fprintf(stderr, "cannot write %s\n", outp.c_str()); return 1; }
   std::vector<unsigned char> row(nby);
+  std::vector<float> p(tan ? nbits : 0);
   size_t nout = 0, nskip = 0, nq0 = 0;
   for (int k = 0; k < nmol; k++) {
     const char* rec = lb.data() + 8 + (size_t)k * (4 + 4 * (size_t)nbits);
     int m; memcpy(&m, rec, 4); const float* z = (const float*)(rec + 4);
     auto it = specOf.find(m);
     if (it == specOf.end() || m < 0 || (size_t)m >= qn.size()) continue;
+    double sp = 0;
+    if (tan)
+      for (int b = 0; b < nbits; b++) {
+        float v = std::min(30.f, std::max(-30.f, z[b]));
+        p[b] = 1.f / (1.f + std::exp(-v));
+        sp += p[b];
+      }
     std::set<int> cs;
     for (int s : it->second) {
       const Head& h = hd[s];
@@ -95,16 +107,18 @@ int main(int argc, char** argv) {
       if (!ok.empty() && ((size_t)c >= ok.size() || ok[c] == 0)) { nskip++; continue; }
       if (FSEEK64(fp, (int64_t)c * (int64_t)nby, SEEK_SET) != 0 || fread(row.data(), 1, nby, fp) != nby) { nskip++; continue; }
       double sc = 0;
+      int nb = 0;
       for (size_t by = 0; by < nby; by++) {
         unsigned v = row[by];
         if (!v) continue;
         for (int bit = 0; bit < 8; bit++)  // packbits: MSB first
           if (v & (0x80u >> bit)) {
             size_t b = by * 8 + (size_t)bit;
-            if (b < (size_t)nbits) sc += z[b];
+            if (b < (size_t)nbits) { sc += tan ? p[b] : z[b]; nb++; }
           }
       }
-      fprintf(fo, "%s\t%s\t%.4f\n", qn[m].c_str(), pn[c].c_str(), sc);
+      if (tan) sc = sc / (nb + sp - sc + 1e-9);
+      fprintf(fo, tan ? "%s\t%s\t%.6f\n" : "%s\t%s\t%.4f\n", qn[m].c_str(), pn[c].c_str(), sc);
       nout++;
     }
   }
