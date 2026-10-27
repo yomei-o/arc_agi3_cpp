@@ -82,3 +82,13 @@ tune38/run38.bat と同じ eval（phys_v38td、v36 相当の設定）を hnqry �
 pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggml(fpown_n_f16) → fpnet_pool（dot と tan）。知名度は ppopf を外し pc=0 で。
 見るもの: (1) hnqry の MRR が LB（0.34）に近い領域か。(2) 既知の LB 順位 v36 (0.344) > v37 (0.343) > v39c (0.339) > v39a (0.328) > v39b (0.319) > v38 (0.303)
 を再現するか（ライブラリ ×0/×1/×1.5/×2、FPNet 1.0/1.5）。再現すれば、この物差しで重みとモデルの変更（ピーク前処理、timsTOF 風の増強、窓内対照損失）を回す。
+
+## 2026-10-27 LB results (forward models)
+| run | change vs v40 (0.345) | LB | e2e hcqry / hxqry |
+|---|---|---|---|
+| v42a | pool popularity 0.15 ungated | 0.347 | - |
+| v41c | public Python ICEBERG 0.5 / GLACIER 1.0, same-formula rr re-rank | **0.355** | - |
+| v43 | own C++ ICE+GL, same form | running | - |
+| v44 | own C++ GLACIER as +0.5 z(gl) inside the fused pool score | pending | 0.5955 / 0.8973 (v40 0.5823 / 0.8918) |
+First LB evidence that forward models help (+0.010). GPU ICEBERG (gpu_ggnn.cu) committed: 127 pred/s at 4 threads, parity 1e-6.
+Note: ice_model.hpp now includes ice_gpu.h -> ship it in the fwmodels dataset src/ on the next version.
