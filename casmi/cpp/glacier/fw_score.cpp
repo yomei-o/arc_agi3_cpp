@@ -8,7 +8,7 @@
 //   C <smiles>[	<iceberg root smiles>]       (candidates, ranked order; root = rm_stereo + InChI round trip, else
 //                                              the RDKit canonical SMILES without stereo is used)
 //   S <adduct>	<mode>	<instrument>	<ce_units>	<ce_orig>	<ce_ev comma list>	<prec>	<mz:it,mz:it,...>
-// out.tsv: <mid>	<smiles>	<gl_ex_mean | nan>	<ice_ex_mean | nan>
+// out.tsv: <mid>	<smiles>	<gl_ex_mean or nan>	<ice_ex_mean or nan>	<formula key>   (groups=N: only same-formula groups in the top N are predicted)
 // GLACIER covers [M+H]+ spectra only (the public lineage's setting), ICEBERG [M+H]+ and [M+Na]+ (positive mode).
 #include <algorithm>
 #include <atomic>
@@ -269,7 +269,8 @@ struct FwModel {
 
 // scores[k][c] for every molecule k / candidate c (NaN = none); predictions parallel over unique jobs
 static std::vector<std::vector<double>> score_model(const FwModel& FM, const std::vector<Mol>& mols,
-                                                    const std::vector<std::vector<std::string>>& roots, int NT,
+                                                    const std::vector<std::vector<std::string>>& roots,
+                                                    const std::vector<std::vector<char>>& want, int NT,
                                                     double deadline, std::chrono::steady_clock::time_point t0) {
   auto el = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
   static const double SUM_CE[3] = {20.0, 40.0, 60.0};
@@ -293,6 +294,7 @@ static std::vector<std::vector<double>> score_model(const FwModel& FM, const std
     keys[k].resize(mols[k].cands.size());
     if (plans[k].empty()) continue;
     for (size_t c = 0; c < mols[k].cands.size(); c++) {
+      if (!want[k][c]) continue;
       keys[k][c] = FM.key_of(mols[k].cands[c], roots[k][c]);
       if (keys[k][c].empty()) continue;
       for (const Plan& p : plans[k]) {
@@ -387,6 +389,29 @@ static std::vector<std::vector<double>> score_model(const FwModel& FM, const std
 }
 
 // SMILES without stereochemistry, RDKit canonical (fallback ICEBERG root when no InChI round trip is supplied)
+// molecular formula key (element counts incl. H, net charge) = what the re-ranker groups candidates by
+static std::string formula_key(const std::string& smi) {
+  std::unique_ptr<RDKit::RWMol> m;
+  try {
+    m.reset(RDKit::SmilesToMol(smi));
+  } catch (...) {
+    return "";
+  }
+  if (!m) return "";
+  std::map<std::string, int> cnt;
+  int chg = 0, hs = 0;
+  for (const RDKit::Atom* a : m->atoms()) {
+    cnt[a->getSymbol()]++;
+    hs += (int)a->getTotalNumHs();
+    chg += a->getFormalCharge();
+  }
+  if (hs) cnt["H"] += hs;
+  std::string k;
+  for (auto& [s, c] : cnt) k += s + std::to_string(c);
+  if (chg) k += (chg > 0 ? "+" : "") + std::to_string(chg);
+  return k;
+}
+
 static std::string nostereo_canon(const std::string& smi) {
   std::unique_ptr<RDKit::RWMol> m;
   try {
@@ -408,7 +433,7 @@ int main(int argc, char** argv) {
   }
   auto t0 = std::chrono::steady_clock::now();
   std::string glw, icew;
-  int NT = 4;
+  int NT = 4, groups_top = 0;
   double budget = 0;
   for (int i = 3; i < argc; i++) {
     std::string a = argv[i];
@@ -416,6 +441,7 @@ int main(int argc, char** argv) {
     if (a.rfind("ice=", 0) == 0) icew = a.substr(4);
     if (a.rfind("threads=", 0) == 0) NT = std::max(1, std::atoi(a.c_str() + 8));
     if (a.rfind("budget=", 0) == 0) budget = std::atof(a.c_str() + 7);
+    if (a.rfind("groups=", 0) == 0) groups_top = std::atoi(a.c_str() + 7);
   }
   std::vector<Mol> mols = read_input(argv[1]);
   // candidate lines may carry the ICEBERG root ("smiles\troot")
@@ -426,6 +452,19 @@ int main(int argc, char** argv) {
       roots[k].push_back(t == std::string::npos ? "" : c.substr(t + 1));
       if (t != std::string::npos) c = c.substr(0, t);
     }
+  // formula of every candidate; groups=N: only members of same-formula groups (>= 2) within the first N
+  // candidates are predicted (the only ones a same-formula re-ranker can move) - others get roots "" -> no key
+  std::vector<std::vector<std::string>> forms(mols.size());
+  std::vector<std::vector<char>> want(mols.size());
+  for (size_t k = 0; k < mols.size(); k++) {
+    std::map<std::string, int> cnt;
+    for (size_t c = 0; c < mols[k].cands.size(); c++) {
+      forms[k].push_back(formula_key(mols[k].cands[c]));
+      if ((int)c < groups_top && !forms[k][c].empty()) cnt[forms[k][c]]++;
+    }
+    for (size_t c = 0; c < mols[k].cands.size(); c++)
+      want[k].push_back(groups_top <= 0 || ((int)c < groups_top && !forms[k][c].empty() && cnt[forms[k][c]] >= 2));
+  }
   std::vector<std::vector<double>> sgl, sice;
   double used = 0;
   if (!glw.empty()) {
@@ -461,7 +500,7 @@ int main(int argc, char** argv) {
       post(predict(M, *F, C), mz, it);
       return true;
     };
-    sgl = score_model(FM, mols, roots, NT, budget, t0);
+    sgl = score_model(FM, mols, roots, want, NT, budget, t0);
     used = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   }
   if (!icew.empty()) {
@@ -501,7 +540,7 @@ int main(int argc, char** argv) {
       post(ice::predict(G, I, *R, C, CHEM), mz, it);
       return true;
     };
-    sice = score_model(FM, mols, roots, NT, budget > 0 ? used + budget : 0, t0);
+    sice = score_model(FM, mols, roots, want, NT, budget > 0 ? used + budget : 0, t0);
   }
   FILE* fo = std::fopen(argv[2], "w");
   if (!fo) return 1;
@@ -512,7 +551,7 @@ int main(int argc, char** argv) {
       if (std::isfinite(g)) std::fprintf(fo, "%.6f", g); else std::fprintf(fo, "nan");
       std::fprintf(fo, "\t");
       if (std::isfinite(s)) std::fprintf(fo, "%.6f", s); else std::fprintf(fo, "nan");
-      std::fprintf(fo, "\n");
+      std::fprintf(fo, "\t%s\n", forms[k][c].c_str());
     }
   std::fclose(fo);
   std::fprintf(stderr, "fw_score: done %.1fs\n",

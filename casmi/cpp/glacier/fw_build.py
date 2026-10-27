@@ -16,7 +16,7 @@ def build_fw_score(src, rdk, obj, out, jobs=4, extra=()):
     for sub in ("RDGeneral", "DataStructs", "Geometry", "GraphMol", "GraphMol/CIPLabeler",
                 "GraphMol/CIPLabeler/configs", "GraphMol/CIPLabeler/rules", "GraphMol/SmilesParse"):
         files += sorted((rdk / sub).glob("*.cpp"))
-    flags = ["-O3", "-std=c++20", "-pthread", "-w", "-mavx2", "-mfma", "-DYY_NO_UNISTD_H",
+    flags = ["-O3", "-std=c++20", "-pthread", "-w", "-mavx2", "-mfma", "-DYY_NO_UNISTD_H", "-D_POSIX_THREAD_SAFE_FUNCTIONS",
              "-I", str(src), "-I", str(rdk), "-I", str(rdk / "boost-min")] + list(extra)
 
     def comp(f):
