@@ -1,0 +1,16 @@
+casmi26-fwmodels: weights and own C++ inference of two public forward (structure -> MS/MS) models, used as
+re-scorers in the CASMI 2026 notebooks (host-approved third-party models).
+
+Weights (float32, re-serialised as named arrays "GLW1": u32 count; per array u32 name length, name, u32 ndim,
+u32 dims, float32 data; tensors bit-identical to the source checkpoints):
+- glacier_w.bin   GLACIER (ms-pred glacier.JointModel), MassSpecGym-trained weights published by the ms-pred authors
+                  (https://github.com/coleygroup/ms-pred, MIT License, Copyright (c) 2023 Samuel Goldman); taken from
+                  the Kaggle dataset ahmedberatozer/casmi26-glacier (ckpt/glacier.pt).
+- ice_gen_w.bin,  ICEBERG 2.1 (ms-pred iceberg FragGNN / IntenGNN), MassSpecGym msg_all checkpoints, ms-pred MIT
+  ice_inten_w.bin License; taken from the Kaggle dataset ahmedberatozer/casmi26-iceberg (ckpt/gen.pt, ckpt/inten.pt).
+
+Code (src/): own C++ re-implementation of the inference and of the runners' scoring, written from the ms-pred Python
+source (MIT) and checked against it (casmi/cpp/glacier in yomei-o/arc_agi3_cpp):
+  glw.hpp gl_model.hpp gl_feat.hpp ice_model.hpp fw_score.cpp.
+src/GraphMol/PartialCharges/: unmodified RDKit 2026.03.1 Gasteiger charge code (BSD-3-Clause, Copyright (c) Greg
+Landrum and the RDKit contributors).

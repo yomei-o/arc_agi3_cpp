@@ -116,6 +116,8 @@ m = dict(meta, id=f"yomeiotani/casmi26-cpp-library-search-{TAG}", title=f"CASMI2
          code_file=name, enable_gpu=True, machine_shape="NvidiaTeslaT4",
          # the Python 3.12 image the public ICEBERG/GLACIER notebooks pin (their RDKit 2025.03 wheel is cp312)
          docker_image="gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+         # the build kernel's prebuilt binaries need GLIBC 2.38 (v41b died on it in this image): compile from source
+         kernel_sources=[],
          dataset_sources=meta["dataset_sources"] + ["ahmedberatozer/casmi26-iceberg", "ahmedberatozer/casmi26-glacier"])
 for d in (NBD, os.path.join(SP, "kp_" + TAG)):
     os.makedirs(d, exist_ok=True)

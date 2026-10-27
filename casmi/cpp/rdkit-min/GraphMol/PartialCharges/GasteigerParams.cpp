@@ -9,9 +9,9 @@
 //  of the RDKit source tree.
 //
 #include <RDGeneral/BoostStartInclude.h>
-#include <boost/flyweight.hpp>
-#include <boost/flyweight/key_value.hpp>
-#include <boost/flyweight/no_tracking.hpp>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <boost/tokenizer.hpp>
 typedef boost::tokenizer<boost::char_separator<char>> tokenizer;
 #include <RDGeneral/BoostEndInclude.h>
@@ -67,10 +67,13 @@ Al      sp3     5.375   4.953   0.867 \n \
 Al      sp2     5.795   5.020   0.695 \n \
 ";
 
-typedef boost::flyweight<
-    boost::flyweights::key_value<std::string, GasteigerParams>,
-    boost::flyweights::no_tracking>
-    gparam_flyweight;
+// rdkit-min: boost::flyweight (not in boost-min) replaced by an equivalent never-freed cache keyed by the
+// parameter text (flyweight<key_value<...>, no_tracking> also keeps one object per distinct key forever).
+static std::mutex gparam_mutex;
+static std::map<std::string, std::unique_ptr<RDKit::GasteigerParams>>& gparam_cache() {
+  static std::map<std::string, std::unique_ptr<RDKit::GasteigerParams>> m;
+  return m;
+}
 
 GasteigerParams::GasteigerParams(std::string paramData) {
   boost::char_separator<char> eolSep("\n");
@@ -119,7 +122,12 @@ GasteigerParams::GasteigerParams(std::string paramData) {
 
 const GasteigerParams *GasteigerParams::getParams(
     const std::string &paramData) {
-  const GasteigerParams *res = &(gparam_flyweight(paramData).get());
-  return res;
+  std::lock_guard<std::mutex> g(gparam_mutex);
+  auto &m = gparam_cache();
+  auto it = m.find(paramData);
+  if (it == m.end()) {
+    it = m.emplace(paramData, std::make_unique<GasteigerParams>(paramData)).first;
+  }
+  return it->second.get();
 }
 }  // namespace RDKit

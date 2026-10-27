@@ -59,6 +59,24 @@ Boltzmann merge の PubChem 側（pi = 混合比 bpi、a = relz の係数 ba、T
 読み: 私たちの PubChem チャネルは「プール外の正解」を 0.20〜0.31 でしか拾えず（上位の公開版は昇格で +0.024〜0.037）、強めても LB の期待利得は
 +0.01 以下で LB の誤差（±0.02）より小さい。昇格そのもの（relp/sp）は relz の単位が違い一度も発火しない（0/400）。v42 以降で pi 0.3 を同梱候補。
 
+## PubChem 1 位昇格の較正（2026-10-27、`py/pc_promo.py`）
+本番（alloc=boltz）では v2 の昇格ルールは無効（Boltzmann がスロット/昇格を置き換える）。Boltzmann の後段に「PubChem の 1 位候補を
+1 位へ」（relz > relp or (S > sp and pop_top >= popp)、gate libSim < 0.9）を足してオフラインで総当たり。
+最良（relp 3, sp 3, popp 7）でもプール外 10/15/20% の仮定で +0.0007 / +0.0017 / +0.0027。最も攻めた設定（sp 3, popp 3）で rm1 の昇格
+77 回中 37 回正解、プール内では 40+19+34+15 回昇格して全部外れ。**私たちの PubChem 1 位の精度が低いので昇格は効かない** → 上位の +0.024〜0.037
+は昇格ルールではなく PubChem 側の採点（全データ学習の FPNet A+B + 知名度 0.15 で 1 億件の窓）の強さから来ている。負の結果。
+
+## 順方向モデル（GLACIER / ICEBERG）の自前 C++ 版（2026-10-27、`cpp/glacier/`）
+- GLACIER: `gl_model.hpp` + `gl_feat.hpp`（RDKit C++ の特徴量、Gasteiger は rdkit-min に追加）。Python と段ごとに一致（特徴量 3e-8、
+  切断点・断片 全一致、出力 6e-7）。AVX2 で 0.08 s/予測。
+- ICEBERG: `ice_model.hpp`。断片生成（3 段の原子除去、ハッシュで重複除去、上位 100）が一致（断片集合 99〜100/100、確率 1e-6）、強度の生値 1e-7。
+  GGNN（512、6 ステップ）が支配的で 0.2〜1.0 s/予測（CPU 1 コアでほぼ上限）。
+- `fw_score.cpp`: 公開 runner と同じ採点（前処理・CE バケット・合算 CE・エントロピー類似度）。runner とのスコア一致: GLACIER r 0.9988 /
+  順序 97.4%、ICEBERG r 0.9937 / 順序 94.9%（残差は float32 の和の順序 → 4 桁丸めと上位 100 の境目）。
+- e2e のオフライン λ 掃引（`fw_sweep.py`）: 順位線形のスコアに足すと悪化（−0.03）、逆数順位なら ICE 0.5 + GL 1.0 で hc +0.009 / hx 0。
+- Kaggle: v41（Python runner）は既定環境で RDKit wheel（cp312）が入らず無効、v41b は py3.12 イメージ固定で prebuilt バイナリが GLIBC 2.38 で動かず失敗、
+  v41c（同イメージ + ソースからコンパイル）実行中。データセット案 `casmi26-fwmodels`（重み + src、ビルド機 `C:\prog\casmi\ds_fwm`）。
+
 ## 評価の手順（記録）
 tune38/run38.bat と同じ eval（phys_v38td、v36 相当の設定）を hnqry で: lib=nlib、mlp=fwd_mlp_rank_nlib.bin、rev2=rev2_n.bin、
 pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggml(fpown_n_f16) → fpnet_pool（dot と tan）。知名度は ppopf を外し pc=0 で。
