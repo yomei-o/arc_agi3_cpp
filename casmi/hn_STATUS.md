@@ -26,7 +26,27 @@ train.parquet を出所 × 装置で数えた（2026-10-26）:
   - `cpp/hn/night_hn_gpu.bat`（hn_gpu, PID 2664）: bits.done を待って `cnn_n_c.bin`（cnn_calib train、12 ep）→ `fpown_n.bin` → `fpown\fpown_n_f16.bin`（自前 FPNet、5 ep）。
   FT は作らない（v37: FT は LB で効果なし）。
 
-## 評価（翌朝）
+## 結果（2026-10-27 朝、`cpp/hn/hn_eval.bat`、final list = _ins.csv、知名度なし）
+| 変種 | hnqry MRR@25 | LB の対応 |
+|---|---|---|
+| 基準（v36 重み、FPNet 内積 1.0） | **0.655** | 0.344 |
+| ライブラリ ×0 (0, 0) | 0.677 (+0.022) | 0.303 (−0.041) **逆** |
+| ライブラリ ×1.5 / ×2 | 0.642 / 0.631 | 0.328 / 0.319（向きは同じ） |
+| FPNet 1.5 | 0.658 (+0.003) | 0.339 (−0.005) |
+| FPNet Tanimoto 形 1.0 | 0.667 (+0.012) | 0.345 (+0.001) |
+| 基準 + 知名度（ppop 0.15） | 0.768 (+0.11) | （有名分子なので当然） |
+読み: (1) 水準 0.655 は LB 0.344 から遠い（denovo なので in-library の部分がなく、有名分子なので easy）。(2) ライブラリの項の向きは他のホールドアウトと同じく
+LB と逆 → LB の「ライブラリの項が効く」は、隠しテストの 2 割前後が train にスペクトルのある分子（sibling/xinstr 型）であることを意味する。
+hnqry は「天然物 × timsTOF × train に無い分子」の部分だけを測る物差し。(3) Tanimoto 形 +0.012 は LB +0.001 と向きは合う。
+**結論: この領域でも重みの調整に伸びしろはない。壁は別（下の「上位の内訳」）。**
+
+## 上位の公開ノートブックの内訳（2026-10-27、`casmi-26-from-spectra-to-structures` 第 14 節、メモリ casmi-top-lineage-attribution）
+0.341 → 0.455 の内訳: **ICEBERG + GLACIER（MassSpecGym で学習された公開の順方向モデル、候補のスペクトルを予測して上位 60 件を再採点）≈ +0.06〜0.08**、
+PubChem の documentation prior（0.15·(ln(1+substances)+ln(1+PubMed))）+ 深い shortlist ≈ +0.013、第 2 エンジン（PubChemLite/ChEBI 候補の LightGBM、
+模擬ランカー行で学習）≈ +0.015〜0.03。彼らの fold-safe FPNet は未見の天然物で top-1 33〜42% → 指紋モデルは差の原因ではない。
+隠しテストに近い公開パネル = enveda-np-examples の 250 分子（= hnqry と同じ分子）。公開 LB は test の 31%（約 124 分子、誤差 ±0.02）。
+
+## 評価の手順（記録）
 tune38/run38.bat と同じ eval（phys_v38td、v36 相当の設定）を hnqry で: lib=nlib、mlp=fwd_mlp_rank_nlib.bin、rev2=rev2_n.bin、
 pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggml(fpown_n_f16) → fpnet_pool（dot と tan）。知名度は ppopf を外し pc=0 で。
 見るもの: (1) hnqry の MRR が LB（0.34）に近い領域か。(2) 既知の LB 順位 v36 (0.344) > v37 (0.343) > v39c (0.339) > v39a (0.328) > v39b (0.319) > v38 (0.303)
