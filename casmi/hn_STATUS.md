@@ -88,7 +88,8 @@ pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggm
 |---|---|---|---|
 | v42a | pool popularity 0.15 ungated | 0.347 | - |
 | v41c | public Python ICEBERG 0.5 / GLACIER 1.0, same-formula rr re-rank | **0.355** | - |
-| v43 | own C++ ICE+GL, same form | running | - |
-| v44 | own C++ GLACIER as +0.5 z(gl) inside the fused pool score | pending | 0.5955 / 0.8973 (v40 0.5823 / 0.8918) |
+| v43 | own C++ ICE+GL, same form | submitted 16:30, pending | - |
+| v44 | own C++ GLACIER as +0.5 z(gl) inside the fused pool score | 0.348 | 0.5955 / 0.8973 (v40 0.5823 / 0.8918) |
 First LB evidence that forward models help (+0.010). GPU ICEBERG (gpu_ggnn.cu) committed: 127 pred/s at 4 threads, parity 1e-6.
 Note: ice_model.hpp now includes ice_gpu.h -> ship it in the fwmodels dataset src/ on the next version.
+v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1:1); the same-formula ICE-carrying form (v41c) is the one that moved the LB.
