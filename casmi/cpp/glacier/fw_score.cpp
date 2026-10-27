@@ -427,6 +427,7 @@ static std::string nostereo_canon(const std::string& smi) {
 #ifdef FW_GPU
 extern "C" bool gl_gpu_linear(const float*, int, const float*, const float*, int, int, float*);
 extern "C" bool gl_gpu_available();
+extern "C" bool gl_gpu_ggnn(const ice::GpuGgnnW&, const ice::GpuGraph&, float*, const ice::GpuHead*, float*);
 #endif
 
 int main(int argc, char** argv) {
@@ -447,11 +448,12 @@ int main(int argc, char** argv) {
     if (a.rfind("threads=", 0) == 0) NT = std::max(1, std::atoi(a.c_str() + 8));
     if (a.rfind("budget=", 0) == 0) budget = std::atof(a.c_str() + 7);
     if (a.rfind("groups=", 0) == 0) groups_top = std::atoi(a.c_str() + 7);
-    if (a == "gpu=1") {
+    if (a == "gpu=1" || a == "gpu=gemm") {  // gpu=1: device-resident ICEBERG GGNN + GEMM hook; gpu=gemm: GEMM hook only
 #ifdef FW_GPU
       if (gl_gpu_available()) {
         set_gpu_linear(gl_gpu_linear);
-        std::fprintf(stderr, "fw_score: GPU GEMMs on\n");
+        if (a == "gpu=1") ice::set_gpu_ggnn(gl_gpu_ggnn);
+        std::fprintf(stderr, "fw_score: GPU GEMMs on%s\n", a == "gpu=1" ? " + device GGNN" : "");
       } else {
         std::fprintf(stderr, "fw_score: no CUDA device - CPU\n");
       }

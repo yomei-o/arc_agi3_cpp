@@ -18,6 +18,7 @@
 #include <chrono>
 
 #include "gl_feat.hpp"
+#include "ice_gpu.h"
 
 namespace ice {
 using namespace gl;
@@ -111,9 +112,35 @@ struct GBatch {
   std::vector<int> gstart, gsize;  // node range per graph
 };
 
+inline GpuGgnnW gpu_w(const GGNN& g) {
+  GpuGgnnW w;
+  w.winp = g.inp.w;
+  w.binp = g.inp.b;
+  for (int t = 0; t < NBT; t++) {
+    w.wet[t] = g.et[t].w;
+    w.bet[t] = g.et[t].b;
+  }
+  w.wih = g.wih;
+  w.whh = g.whh;
+  w.bih = g.bih;
+  w.bhh = g.bhh;
+  w.in = g.inp.in;
+  w.H = g.H;
+  w.steps = g.steps;
+  return w;
+}
+inline GpuGraph gpu_graph(const GBatch& B) {
+  return GpuGraph{B.N, (int)B.src.size(), B.G, B.x.data(), B.src.data(), B.dst.data(), B.typ.data(),
+                  B.gstart.data(), B.gsize.data(), B.gid.data()};
+}
+
 // GGNN (input projection + GatedGraphConv(n steps, 4 edge types) with a GRU cell) -> node states [N, H]
 inline std::vector<float> ggnn(const GGNN& g, const GBatch& B) {
   const int H = g.H, N = B.N;
+  if (GpuGgnnFn f = gpu_ggnn_hook()) {  // optional device-resident path (gpu_ggnn.cu)
+    std::vector<float> hd((size_t)N * H);
+    if (f(gpu_w(g), gpu_graph(B), hd.data(), nullptr, nullptr)) return hd;
+  }
   std::vector<float> h = linear(B.x, N, g.inp);
   std::vector<float> a((size_t)N * H), gi((size_t)N * 3 * H), gh((size_t)N * 3 * H);
   Lin Lih{g.wih, g.bih, H, 3 * H}, Lhh{g.whh, g.bhh, H, 3 * H};
@@ -366,13 +393,36 @@ inline std::vector<float> predict(const Net& Gm, const Net& Im, const Root& R, c
     for (int f : frontier) fl.push_back(&kept[f].atoms);
     GBatch B = make_batch(R, fl, true, cond_g);
     auto tq0 = std::chrono::steady_clock::now();
+    const int D = Gm.mlp_in.in;
+    std::vector<float> fe(NFORM * FDIM), de(NFORM * FDIM), o;
+    if (GpuGgnnFn f = gpu_ggnn_hook()) {
+      // device GGNN + per-atom MLP: only the per-fragment tail [broken one-hot, form enc, diff enc] goes up
+      const int tw = D - 3 * HG;
+      std::vector<float> tail((size_t)B.G * tw, 0.f);
+      for (int g = 0; g < B.G; g++) {
+        const Frag& F = kept[frontier[g]];
+        float diff[NFORM];
+        for (int e = 0; e < NFORM; e++) diff[e] = R.root_form[e] - F.form[e];
+        float* r = &tail[(size_t)g * tw];
+        r[(int)std::min(F.broken, (float)MAXBR)] = 1.f;
+        Gm.form_embed(F.form, r + MAXBR + 1);
+        Gm.form_embed(diff, r + MAXBR + 1 + NFORM * FDIM);
+      }
+      GpuHead hd{rootemb.data(), tail.data(), Gm.mlp_in.w, Gm.mlp_in.b, Gm.mlp_out.w, Gm.mlp_out.b, D, Gm.mlp_in.out};
+      o.resize(B.N);
+      if (Gm.mlp_out.out != 1 || !f(gpu_w(Gm.gnn), gpu_graph(B), nullptr, &hd, o.data())) o.clear();
+      if (tr && !o.empty()) {
+        tr->t_gnn += std::chrono::duration<double>(std::chrono::steady_clock::now() - tq0).count();
+        tr->nodes_per_depth.push_back(B.N);
+      }
+    }
+    if (o.empty()) {
     std::vector<float> h = ggnn(Gm.gnn, B);
     auto tq1 = std::chrono::steady_clock::now();
     if (tr) { tr->t_gnn += std::chrono::duration<double>(tq1 - tq0).count(); tr->nodes_per_depth.push_back(B.N); }
     std::vector<float> avg = avg_pool(h, B, HG);
     // per-atom MLP input [root, root - avg, h, broken one-hot, form enc, diff enc]
-    const int D = Gm.mlp_in.in;
-    std::vector<float> X((size_t)B.N * D, 0.f), fe(NFORM * FDIM), de(NFORM * FDIM);
+    std::vector<float> X((size_t)B.N * D, 0.f);
     for (int g = 0; g < B.G; g++) {
       const Frag& F = kept[frontier[g]];
       float diff[NFORM];
@@ -394,9 +444,10 @@ inline std::vector<float> predict(const Net& Gm, const Net& Im, const Root& R, c
     }
     std::vector<float> hid = linear(X, B.N, Gm.mlp_in);
     for (float& t : hid) t = t > 0.f ? t : 0.f;
-    std::vector<float> o = linear(hid, B.N, Gm.mlp_out);
+    o = linear(hid, B.N, Gm.mlp_out);
     auto tq2 = std::chrono::steady_clock::now();
     if (tr) tr->t_mlp += std::chrono::duration<double>(tq2 - tq1).count();
+    }
     // candidates (accumulated prob, frontier slot, atom)
     struct Cand {
       float p;

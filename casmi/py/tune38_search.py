@@ -122,9 +122,18 @@ def opt_string(W):
 def main():
     D, OUT = sys.argv[1], sys.argv[2]
     sweeps = 3
+    global TIMS, REPORT
     for a in sys.argv[3:]:
         if a.startswith("sweeps="):
             sweeps = int(a.split("=")[1])
+        # tims=hnqry:n_base_nopop,... / report=... : other yardstick sets (hn_STATUS.md: the natural-product x timsTOF dumps)
+        if a.startswith("tims="):
+            TIMS = [tuple(x.split(":")) for x in a.split("=", 1)[1].split(",") if x]
+        if a.startswith("report="):
+            REPORT = [tuple(x.split(":")) for x in a.split("=", 1)[1].split(",") if x]
+        if a.startswith("skip="):   # weights left out of the search (e.g. ft when the dumps have no FT term)
+            for k in a.split("=", 1)[1].split(","):
+                GRID.pop(k, None)
     os.makedirs(OUT, exist_ok=True)
     lf = open(f"{OUT}/search.log", "w", encoding="utf-8")
 

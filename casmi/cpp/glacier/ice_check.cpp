@@ -7,11 +7,23 @@
 
 #include "ice_model.hpp"
 
+#ifdef FW_GPU
+extern "C" bool gl_gpu_linear(const float*, int, const float*, const float*, int, int, float*);
+extern "C" bool gl_gpu_ggnn(const ice::GpuGgnnW&, const ice::GpuGraph&, float*, const ice::GpuHead*, float*);
+#endif
+
 int main(int argc, char** argv) {
   if (argc < 5) {
-    std::fprintf(stderr, "usage: ice_check gen_w.bin inten_w.bin refdir ncases\n");
+    std::fprintf(stderr, "usage: ice_check gen_w.bin inten_w.bin refdir ncases [gpu]\n");
     return 1;
   }
+#ifdef FW_GPU
+  if (argc > 5 && std::string(argv[5]) == "gpu") {
+    gl::set_gpu_linear(gl_gpu_linear);
+    ice::set_gpu_ggnn(gl_gpu_ggnn);
+    std::printf("GPU: GEMM hook + device GGNN\n");
+  }
+#endif
   ice::Net G(argv[1], 6, false), I(argv[2], 4, true);
   float CHEM[18];
   for (int e = 0; e < 18; e++) CHEM[e] = (float)gl::ELEMENT_MASS[e];
