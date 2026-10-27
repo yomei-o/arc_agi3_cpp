@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <immintrin.h>
 #include <map>
 #include <numeric>
 #include <set>
@@ -163,6 +164,78 @@ struct Model {
 };
 
 // ---------------------------------------------------------------------------------------------- primitives -------
+#if defined(__AVX2__) && defined(__FMA__) || defined(__AVX2__) && defined(_MSC_VER)
+inline float hsum8(__m256 v) {
+  __m128 a = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+  a = _mm_add_ps(a, _mm_movehl_ps(a, a));
+  a = _mm_add_ss(a, _mm_shuffle_ps(a, a, 1));
+  return _mm_cvtss_f32(a);
+}
+// y[n, out] = x[n, in] W^T + b: 4 rows x 4 outputs per block, 16 AVX2 accumulators, scalar tails
+inline void linear(const float* x, int n, const Lin& L, float* y) {
+  const int K = L.in, K8 = K & ~7;
+  int r = 0;
+  for (; r + 4 <= n; r += 4) {
+    const float* x0 = x + (size_t)r * K;
+    const float* x1 = x0 + K;
+    const float* x2 = x1 + K;
+    const float* x3 = x2 + K;
+    int o = 0;
+    for (; o + 4 <= L.out; o += 4) {
+      const float* w0 = L.w + (size_t)o * K;
+      const float* w1 = w0 + K;
+      const float* w2 = w1 + K;
+      const float* w3 = w2 + K;
+      __m256 a[16];
+      for (int t = 0; t < 16; t++) a[t] = _mm256_setzero_ps();
+      for (int k = 0; k < K8; k += 8) {
+        __m256 b0 = _mm256_loadu_ps(w0 + k), b1 = _mm256_loadu_ps(w1 + k), b2 = _mm256_loadu_ps(w2 + k),
+               b3 = _mm256_loadu_ps(w3 + k);
+        __m256 v = _mm256_loadu_ps(x0 + k);
+        a[0] = _mm256_fmadd_ps(v, b0, a[0]); a[1] = _mm256_fmadd_ps(v, b1, a[1]);
+        a[2] = _mm256_fmadd_ps(v, b2, a[2]); a[3] = _mm256_fmadd_ps(v, b3, a[3]);
+        v = _mm256_loadu_ps(x1 + k);
+        a[4] = _mm256_fmadd_ps(v, b0, a[4]); a[5] = _mm256_fmadd_ps(v, b1, a[5]);
+        a[6] = _mm256_fmadd_ps(v, b2, a[6]); a[7] = _mm256_fmadd_ps(v, b3, a[7]);
+        v = _mm256_loadu_ps(x2 + k);
+        a[8] = _mm256_fmadd_ps(v, b0, a[8]); a[9] = _mm256_fmadd_ps(v, b1, a[9]);
+        a[10] = _mm256_fmadd_ps(v, b2, a[10]); a[11] = _mm256_fmadd_ps(v, b3, a[11]);
+        v = _mm256_loadu_ps(x3 + k);
+        a[12] = _mm256_fmadd_ps(v, b0, a[12]); a[13] = _mm256_fmadd_ps(v, b1, a[13]);
+        a[14] = _mm256_fmadd_ps(v, b2, a[14]); a[15] = _mm256_fmadd_ps(v, b3, a[15]);
+      }
+      const float* xs[4] = {x0, x1, x2, x3};
+      const float* ws[4] = {w0, w1, w2, w3};
+      for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+          float s = hsum8(a[i * 4 + j]);
+          for (int k = K8; k < K; k++) s += xs[i][k] * ws[j][k];
+          y[(size_t)(r + i) * L.out + o + j] = s + (L.b ? L.b[o + j] : 0.f);
+        }
+    }
+    for (; o < L.out; o++) {
+      const float* w = L.w + (size_t)o * K;
+      for (int i = 0; i < 4; i++) {
+        const float* xr = x + (size_t)(r + i) * K;
+        float s = 0.f;
+        for (int k = 0; k < K; k++) s += xr[k] * w[k];
+        y[(size_t)(r + i) * L.out + o] = s + (L.b ? L.b[o] : 0.f);
+      }
+    }
+  }
+  for (; r < n; r++) {
+    const float* xr = x + (size_t)r * K;
+    for (int o = 0; o < L.out; o++) {
+      const float* w = L.w + (size_t)o * K;
+      __m256 acc = _mm256_setzero_ps();
+      for (int k = 0; k < K8; k += 8) acc = _mm256_fmadd_ps(_mm256_loadu_ps(xr + k), _mm256_loadu_ps(w + k), acc);
+      float s = hsum8(acc);
+      for (int k = K8; k < K; k++) s += xr[k] * w[k];
+      y[(size_t)r * L.out + o] = s + (L.b ? L.b[o] : 0.f);
+    }
+  }
+}
+#else
 // y[n, out] = x[n, in] W^T + b
 inline void linear(const float* x, int n, const Lin& L, float* y) {
   for (int r = 0; r < n; r++) {
@@ -176,6 +249,7 @@ inline void linear(const float* x, int n, const Lin& L, float* y) {
     }
   }
 }
+#endif
 inline std::vector<float> linear(const std::vector<float>& x, int n, const Lin& L) {
   std::vector<float> y((size_t)n * L.out);
   linear(x.data(), n, L, y.data());

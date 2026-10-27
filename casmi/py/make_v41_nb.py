@@ -81,7 +81,9 @@ try:
     for mid, (smis, forms, keys) in lists.items():
         if not smis:
             continue
-        scores = [float(len(smis) - i) for i in range(len(smis))]
+        # reciprocal-rank scores protect the top of the list (fw_sweep.py on e2e: rank-linear scores let the forward
+        # models overturn top-1 in 200/800 molecules and lost 0.03; reciprocal rank +0.009 hcqry / 0 hxqry)
+        scores = [1.0 / (i + 1) for i in range(len(smis))]
         order = gl_fuse.rerank_multi(smis, keys, scores, forms, [ice.get(mid, {}), gl.get(mid, {})],
                                      [LAM_ICE, LAM_GL], top_n=25)
         if order != list(range(len(smis))):
@@ -111,7 +113,9 @@ for c in nb["cells"]:
         ast.parse("\n".join(l for l in "".join(c["source"]).splitlines() if not l.startswith(("!", "%"))))
 name = f"casmi_match_{TAG}.ipynb"
 m = dict(meta, id=f"yomeiotani/casmi26-cpp-library-search-{TAG}", title=f"CASMI26 cpp library search {TAG}",
-         code_file=name, enable_gpu=True,
+         code_file=name, enable_gpu=True, machine_shape="NvidiaTeslaT4",
+         # the Python 3.12 image the public ICEBERG/GLACIER notebooks pin (their RDKit 2025.03 wheel is cp312)
+         docker_image="gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
          dataset_sources=meta["dataset_sources"] + ["ahmedberatozer/casmi26-iceberg", "ahmedberatozer/casmi26-glacier"])
 for d in (NBD, os.path.join(SP, "kp_" + TAG)):
     os.makedirs(d, exist_ok=True)
