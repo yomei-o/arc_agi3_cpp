@@ -172,7 +172,7 @@ inline float hsum8(__m256 v) {
   return _mm_cvtss_f32(a);
 }
 // y[n, out] = x[n, in] W^T + b: 4 rows x 4 outputs per block, 16 AVX2 accumulators, scalar tails
-inline void linear(const float* x, int n, const Lin& L, float* y) {
+inline void linear_cpu(const float* x, int n, const Lin& L, float* y) {
   const int K = L.in, K8 = K & ~7;
   int r = 0;
   for (; r + 4 <= n; r += 4) {
@@ -237,7 +237,7 @@ inline void linear(const float* x, int n, const Lin& L, float* y) {
 }
 #else
 // y[n, out] = x[n, in] W^T + b
-inline void linear(const float* x, int n, const Lin& L, float* y) {
+inline void linear_cpu(const float* x, int n, const Lin& L, float* y) {
   for (int r = 0; r < n; r++) {
     const float* xr = x + (size_t)r * L.in;
     float* yr = y + (size_t)r * L.out;
@@ -250,6 +250,19 @@ inline void linear(const float* x, int n, const Lin& L, float* y) {
   }
 }
 #endif
+// Optional GPU path (gpu_linear.cu, cuBLAS): set once with set_gpu_linear(); used for GEMMs big enough to pay for the
+// copies, falls back to the CPU kernel on any failure.
+using GpuLinearFn = bool (*)(const float*, int, const float*, const float*, int, int, float*);
+inline GpuLinearFn& gpu_linear_hook() {
+  static GpuLinearFn f = nullptr;
+  return f;
+}
+inline void set_gpu_linear(GpuLinearFn f) { gpu_linear_hook() = f; }
+inline void linear(const float* x, int n, const Lin& L, float* y) {
+  GpuLinearFn g = gpu_linear_hook();
+  if (g && (double)n * L.in * L.out >= 4e6 && g(x, n, L.w, L.b, L.in, L.out, y)) return;
+  linear_cpu(x, n, L, y);
+}
 inline std::vector<float> linear(const std::vector<float>& x, int n, const Lin& L) {
   std::vector<float> y((size_t)n * L.out);
   linear(x.data(), n, L, y.data());

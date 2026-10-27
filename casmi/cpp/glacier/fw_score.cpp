@@ -424,6 +424,11 @@ static std::string nostereo_canon(const std::string& smi) {
   }
 }
 
+#ifdef FW_GPU
+extern "C" bool gl_gpu_linear(const float*, int, const float*, const float*, int, int, float*);
+extern "C" bool gl_gpu_available();
+#endif
+
 int main(int argc, char** argv) {
   if (argc < 4) {
     std::fprintf(stderr,
@@ -442,6 +447,18 @@ int main(int argc, char** argv) {
     if (a.rfind("threads=", 0) == 0) NT = std::max(1, std::atoi(a.c_str() + 8));
     if (a.rfind("budget=", 0) == 0) budget = std::atof(a.c_str() + 7);
     if (a.rfind("groups=", 0) == 0) groups_top = std::atoi(a.c_str() + 7);
+    if (a == "gpu=1") {
+#ifdef FW_GPU
+      if (gl_gpu_available()) {
+        set_gpu_linear(gl_gpu_linear);
+        std::fprintf(stderr, "fw_score: GPU GEMMs on\n");
+      } else {
+        std::fprintf(stderr, "fw_score: no CUDA device - CPU\n");
+      }
+#else
+      std::fprintf(stderr, "fw_score: built without FW_GPU - CPU\n");
+#endif
+    }
   }
   std::vector<Mol> mols = read_input(argv[1]);
   // candidate lines may carry the ICEBERG root ("smiles\troot")
