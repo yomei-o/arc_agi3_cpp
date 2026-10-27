@@ -46,6 +46,19 @@ PubChem の documentation prior（0.15·(ln(1+substances)+ln(1+PubMed))）+ 深�
 模擬ランカー行で学習）≈ +0.015〜0.03。彼らの fold-safe FPNet は未見の天然物で top-1 33〜42% → 指紋モデルは差の原因ではない。
 隠しテストに近い公開パネル = enveda-np-examples の 250 分子（= hnqry と同じ分子）。公開 LB は test の 31%（約 124 分子、誤差 ±0.02）。
 
+## PubChem チャネルの強さの較正（2026-10-27、`py/pc_sweep.py`、`cpp/hn/rm1_hc.bat` = hcqry rm=1 のダンプ t38c_rm1）
+Boltzmann merge の PubChem 側（pi = 混合比 bpi、a = relz の係数 ba、T2）をオフラインで総当たり。正解をプールから抜いた hcqry（rm1 = 隠しテストの
+「プール外」部分の代理）の利得 vs プール内 4 集合（hc, hx, hb, hbs）の損:
+| pi / a / T2 | rm1 | in-pool 平均 | hcqry | hbqry |
+|---|---|---|---|---|
+| 0.1 / 0.5 / 0.5（v36〜v40 本番） | 0.201 | 0.797 | 0.549 | 0.827 |
+| 0.2 / 0.5 / 0.5 | 0.227 | 0.795 | 0.546 | 0.826 |
+| 0.3 / 0.5 / 0.5 | 0.254 | 0.792 | 0.536 | 0.825 |
+| 0.5 / 1.0 / 0.5 | 0.315 | 0.779 | 0.505 | 0.811 |
+プール外の割合 f の仮定で最適が変わる: f=0.1 → pi 0.2（混合 +0.002）、f=0.15 → pi 0.3（+0.004）、f≥0.2 → pi 0.5 a 1.0（+0.008）。
+読み: 私たちの PubChem チャネルは「プール外の正解」を 0.20〜0.31 でしか拾えず（上位の公開版は昇格で +0.024〜0.037）、強めても LB の期待利得は
++0.01 以下で LB の誤差（±0.02）より小さい。昇格そのもの（relp/sp）は relz の単位が違い一度も発火しない（0/400）。v42 以降で pi 0.3 を同梱候補。
+
 ## 評価の手順（記録）
 tune38/run38.bat と同じ eval（phys_v38td、v36 相当の設定）を hnqry で: lib=nlib、mlp=fwd_mlp_rank_nlib.bin、rev2=rev2_n.bin、
 pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggml(fpown_n_f16) → fpnet_pool（dot と tan）。知名度は ppopf を外し pc=0 で。

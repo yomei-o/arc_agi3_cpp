@@ -36,7 +36,7 @@ try:
         p = os.environ.get(env)
         if p and os.path.exists(os.path.join(p, name)):
             return p
-        hits = sorted(_glob.glob("/kaggle/input/**/" + name, recursive=True), key=len)
+        hits = sorted(_glob.glob(os.path.join(str(_PB_INPUT), "**", name), recursive=True), key=len)
         if not hits:
             raise RuntimeError(name + " not found")
         return os.path.dirname(hits[0])
