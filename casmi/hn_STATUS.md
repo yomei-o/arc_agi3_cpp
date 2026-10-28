@@ -110,3 +110,7 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   (se about 0.008 hc / 0.003 hx). Caveat: e2e ranked v44 above v43, the LB the other way round.
 - Kaggle T4 GPU: fw_build.py gpu=sm_75 (nvcc 12.8) builds; 2597 ICE predictions 198 s GPU vs 2122 s CPU, ice max|diff| 1e-6.
 - v46 = v40 + 0.5 z(gl) + 0.5 z(ice) inside the fused score, T4 (running).
+- **v46b (GPU worked: all 24,716 ICE predictions, 2017 s on T4) LB 0.338 - below v40 0.345.** The fused-score form
+  (v44 0.348, v46b 0.338) loses on the LB although e2e put it first (+0.022 hcqry). The same-formula rr group form
+  (v41c 0.355, v43 0.356) is the one that transfers. Build on make_v43_nb.py; judge its variants on the LB only.
+  v45 (v43 + full ICE coverage) and v46 (CPU fallback) pending.
