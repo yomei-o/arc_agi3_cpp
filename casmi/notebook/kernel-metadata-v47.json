@@ -1,0 +1,25 @@
+{
+  "id": "yomeiotani/casmi26-cpp-library-search-v47",
+  "title": "CASMI26 cpp library search v47",
+  "code_file": "casmi_match_v47.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": [
+    "yomeiotani/casmi26-rdkit-min",
+    "yomeiotani/casmi26-pool-expanded",
+    "yomeiotani/casmi26-fpnet-pool",
+    "yomeiotani/casmi26-pubchem-whole",
+    "yomeiotani/casmi26-fwmodels"
+  ],
+  "kernel_sources": [
+    "yomeiotani/casmi26-cpp-build"
+  ],
+  "competition_sources": [
+    "enveda-CASMI26-molecule-id-mass-spectra"
+  ],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
