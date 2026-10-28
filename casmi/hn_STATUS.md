@@ -93,3 +93,20 @@ pcfp=rev3_n_fp3c16k_big.bin、cnnmodel=cnn_n_c.bin、FPNet スコア = fpnet_ggm
 First LB evidence that forward models help (+0.010). GPU ICEBERG (gpu_ggnn.cu) committed: 127 pred/s at 4 threads, parity 1e-6.
 Note: ice_model.hpp now includes ice_gpu.h -> ship it in the fwmodels dataset src/ on the next version.
 v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1:1); the same-formula ICE-carrying form (v41c) is the one that moved the LB.
+
+## 2026-10-28
+- v43 (own C++ ICE+GL, same-formula rr re-rank) LB **0.356** (best; v41c public Python 0.355) -> own inference replaces the public runners.
+  v43 log: ICEBERG hit the 10800 s CPU budget, 4746 / 18515 predictions skipped -> v45 = v43 with budget 18000 (running).
+- e2e offline sweep of the fused-score form with ICEBERG (`cpp/glacier/fw_sweep2.py`, GPU fw_score over work_v44/fw_in.txt:
+  45k GL + 48k ICE predictions in 1080 s on the build machine). Reproduces v44 exactly (gl 0.5: 0.5955 / 0.8973).
+  | w_gl | w_ice | hcqry | hxqry |
+  |---|---|---|---|
+  | 0.5 | 0 | +0.013 | +0.006 |
+  | 0 | 1.0 | +0.020 | +0.000 |
+  | 0.5 | 0.25 | +0.023 | +0.005 |
+  | **0.5** | **0.5** | **+0.022** | **+0.006** |
+  | 1.0 | 0.5 | +0.018 | +0.009 |
+  | 1.0 | 1.0 | +0.022 | +0.007 |
+  (se about 0.008 hc / 0.003 hx). Caveat: e2e ranked v44 above v43, the LB the other way round.
+- Kaggle T4 GPU: fw_build.py gpu=sm_75 (nvcc 12.8) builds; 2597 ICE predictions 198 s GPU vs 2122 s CPU, ice max|diff| 1e-6.
+- v46 = v40 + 0.5 z(gl) + 0.5 z(ice) inside the fused score, T4 (running).

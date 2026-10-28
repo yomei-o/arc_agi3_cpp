@@ -7,51 +7,10 @@ the final list re-ordered among their own slots (as the v44 notebook block), mer
 """
 import csv, importlib.util, math, os, sys
 
-W, TRUTH, E2E = sys.argv[1:4]
 
 
 def rd(p):
     return {r[0]: r[1] for r in csv.reader(open(p, encoding="utf-8")) if r and r[0] != "molecule_id"}
-
-
-pool = rd(os.path.join(W, "pool_candidates.csv"))
-direct = rd(os.path.join(W, "direct_submission.csv"))
-pp = {}
-for l in open(os.path.join(W, "pp_dump.txt"), encoding="utf-8"):
-    p = l.rstrip("\n").split("\t")
-    if len(p) >= 6:
-        pp.setdefault(p[0], []).append((int(p[1]), float(p[2]), int(p[3]), float(p[4]), p[5]))
-need = {e[4] for v in pp.values() for e in v if e[2] == 1}
-name2smi = {}
-for l in open(os.path.join(W, "pool730_mols.txt"), encoding="utf-8"):
-    t = l.find("\t")
-    if t > 0 and l[:t] in need:
-        name2smi[l[:t]] = l[t + 1:].rstrip("\r\n")
-gl, ice = {}, {}
-for l in open(os.path.join(W, "fw_out_gi.tsv"), encoding="utf-8"):
-    p = l.rstrip("\n").split("\t")
-    if len(p) >= 4:
-        for d, x in ((gl, p[2]), (ice, p[3])):
-            if x != "nan":
-                d[(p[0], p[1])] = float(x)
-print("candidates scored: gl %d ice %d" % (len(gl), len(ice)))
-truth = {}
-for l in open(TRUTH, encoding="utf-8"):
-    t = l.rstrip("\r\n").split("\t")
-    if len(t) >= 4:
-        truth[t[0]] = t
-spec = importlib.util.spec_from_file_location("e2e_score", os.path.join(E2E, "e2e_score.py"))
-es = importlib.util.module_from_spec(spec)
-_argv = sys.argv
-sys.argv = [sys.argv[0]]
-spec.loader.exec_module(es)
-sys.argv = _argv
-allsmi = set(t[3] for t in truth.values())
-for v in list(pool.values()) + list(direct.values()):
-    allsmi.update(s for s in v.split(";") if s)
-K = es.keys_for(sorted(allsmi))
-tkey = {m: (K[t[3]][0] or t[2]) for m, t in truth.items()}
-sets = sorted({t[1] for t in truth.values()})
 
 
 def z(vals):
@@ -108,15 +67,65 @@ def run(wg, wi):
     return mrr(lists)
 
 
-base, bper = run(0, 0)
-print("v40-equivalent (no forward model):", {k: round(v, 4) for k, v in base.items()})
-for wg, wi in ((0.5, 0), (0, 0.25), (0, 0.5), (0, 1.0), (0.25, 0.25), (0.5, 0.25), (0.5, 0.5), (0.5, 1.0), (1.0, 0.5),
-               (1.0, 1.0), (0.25, 0.5)):
-    r, per = run(wg, wi)
-    s = []
-    for k in sets:
-        d = [a - b for a, b in zip(per[k], bper[k])]
-        mu = sum(d) / len(d)
-        se = math.sqrt(sum((x - mu) ** 2 for x in d) / (len(d) - 1) / len(d))
-        s.append(f"{k} {r[k]:.4f} ({r[k] - base[k]:+.4f} se {se:.4f})")
-    print(f"gl {wg:<4} ice {wi:<4}: " + "  ".join(s), flush=True)
+
+def main():
+    global W, TRUTH, E2E, pool, direct, pp, name2smi, gl, ice, truth, es, K, tkey, sets
+    W, TRUTH, E2E = sys.argv[1:4]
+
+
+    pool = rd(os.path.join(W, "pool_candidates.csv"))
+    direct = rd(os.path.join(W, "direct_submission.csv"))
+    pp = {}
+    for l in open(os.path.join(W, "pp_dump.txt"), encoding="utf-8"):
+        p = l.rstrip("\n").split("\t")
+        if len(p) >= 6:
+            pp.setdefault(p[0], []).append((int(p[1]), float(p[2]), int(p[3]), float(p[4]), p[5]))
+    need = {e[4] for v in pp.values() for e in v if e[2] == 1}
+    name2smi = {}
+    for l in open(os.path.join(W, "pool730_mols.txt"), encoding="utf-8"):
+        t = l.find("\t")
+        if t > 0 and l[:t] in need:
+            name2smi[l[:t]] = l[t + 1:].rstrip("\r\n")
+    gl, ice = {}, {}
+    for l in open(os.path.join(W, "fw_out_gi.tsv"), encoding="utf-8"):
+        p = l.rstrip("\n").split("\t")
+        if len(p) >= 4:
+            for d, x in ((gl, p[2]), (ice, p[3])):
+                if x != "nan":
+                    d[(p[0], p[1])] = float(x)
+    print("candidates scored: gl %d ice %d" % (len(gl), len(ice)))
+    truth = {}
+    for l in open(TRUTH, encoding="utf-8"):
+        t = l.rstrip("\r\n").split("\t")
+        if len(t) >= 4:
+            truth[t[0]] = t
+    sys.path.insert(0, E2E)
+    _argv = sys.argv
+    sys.argv = [sys.argv[0]]
+    import e2e_score as es  # importable module: Windows multiprocessing workers re-import it
+    sys.argv = _argv
+    allsmi = set(t[3] for t in truth.values())
+    for v in list(pool.values()) + list(direct.values()):
+        allsmi.update(s for s in v.split(";") if s)
+    K = es.keys_for(sorted(allsmi))
+    tkey = {m: (K[t[3]][0] or t[2]) for m, t in truth.items()}
+    sets = sorted({t[1] for t in truth.values()})
+
+
+    base, bper = run(0, 0)
+    print("v40-equivalent (no forward model):", {k: round(v, 4) for k, v in base.items()})
+    for wg, wi in ((0.5, 0), (0, 0.25), (0, 0.5), (0, 1.0), (0.25, 0.25), (0.5, 0.25), (0.5, 0.5), (0.5, 1.0), (1.0, 0.5),
+                   (1.0, 1.0), (0.25, 0.5)):
+        r, per = run(wg, wi)
+        s = []
+        for k in sets:
+            d = [a - b for a, b in zip(per[k], bper[k])]
+            mu = sum(d) / len(d)
+            se = math.sqrt(sum((x - mu) ** 2 for x in d) / (len(d) - 1) / len(d))
+            s.append(f"{k} {r[k]:.4f} ({r[k] - base[k]:+.4f} se {se:.4f})")
+        print(f"gl {wg:<4} ice {wi:<4}: " + "  ".join(s), flush=True)
+
+
+
+if __name__ == "__main__":
+    main()
