@@ -29,3 +29,16 @@ H シフトなし（断片 + プロトンのみ、全深さ）は 0.421 → **H 
 2. 学習: IntenGNN 型の順伝播（既存）+ 手書きの逆伝播（GGNN/GRU、Transformer、ビンのソフトマックス、コサイン損失）を GPU（`cpp/rev/backend.hpp`）で。
    まず小さく（GGNN 2 ステップ、128 次元）で動作確認 → wlib で学習 → hxqry / hnqry で GLACIER（公開重み）と比較。
 3. 本番: 融合スコアに +w·z(fwd2)（v44 と同じ差し込み口）。
+
+## 2026-10-28 domain-gap check: no timsTOF penalty for the public weights (`cpp/glacier/fw_domain.py`)
+train.parquet [M+H]+, 400 spectra per instrument (one per molecule), candidates = truth + 9 random same-formula isomers
+from train, GPU fw_score. MRR of the truth (random 0.293):
+| instrument (lib) | ICEBERG | GLACIER |
+|---|---|---|
+| timsTOF (enveda-180) | **0.948** | **0.955** |
+| Orbitrap (all) | 0.896 | 0.935 |
+| Orbitrap (pluskal_ms2) | 0.932 | 0.962 |
+| QTOF (riken) | 0.780 | 0.787 |
+The models are at least as good on timsTOF as on Orbitrap, so retraining on timsTOF has no measured gap to close
+(on this easy random-isomer task; the hard case is similar pool isomers). fwd2 deprioritised; the lever is how the
+scores are used (v45 / v46) and covering more candidates.
