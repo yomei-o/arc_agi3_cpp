@@ -90,7 +90,13 @@ try:
                                           _f(getattr(r, "collision_energy_orig_units", None)),
                                           _f(getattr(r, "collision_energy_orig", None)), ce,
                                           repr(float(r.precursor_mz)), pk]) + "\\n")
-    _gpu = _sp.run(["nvidia-smi", "-L"], capture_output=True, text=True).returncode == 0 if _os.path.exists("/usr/bin/nvidia-smi") else False
+    import shutil as _sh
+    _nvcc = _sh.which("nvcc") or ("/usr/local/cuda/bin/nvcc" if _os.path.exists("/usr/local/cuda/bin/nvcc") else None)
+    _smi = _sh.which("nvidia-smi")
+    _gpu = bool(_nvcc) and (_os.path.exists("/dev/nvidia0") or (
+        _smi is not None and _sp.run([_smi, "-L"], capture_output=True, text=True).returncode == 0))
+    print("GPU check: nvcc %s, nvidia-smi %s, /dev/nvidia0 %s -> gpu %s"
+          % (_nvcc, _smi, _os.path.exists("/dev/nvidia0"), _gpu), flush=True)
     rc = build_fw_score(FW_SRC, RDKIT_MIN, WORK / "fw_obj", WORK / "fw_score", jobs=4, gpu="sm_75" if _gpu else None)
     if rc != 0 and _gpu:
         print("GPU fw_score build failed - CPU build", flush=True)
