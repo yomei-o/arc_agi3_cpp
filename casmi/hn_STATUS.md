@@ -137,3 +137,10 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   Direction agrees (heavy weights hurt) but the optimum is shifted (e2e 0.5, LB 1.0): e2e cannot fine-tune weights.
 - Truth position in the fused top 60 (e2e work_v44): hcqry rank 1: 167, 2-5: 131, 6-25: 48, 26-60: 10, absent 44;
   hxqry 325 / 70 / 4 / 1 / 0 -> going deeper than 25 is worth at most ~2.5%; the lever is the order of the top 5.
+- Public 0.468 forward-model path (subagent read of nbtxt/lb-0-468 FROZEN): the FINAL same-formula rerank uses
+  **GLACIER alone** (ICEBERG only as a fallback where GLACIER has no [M+H]+ scores; their note: both 0.402, GL only 0.417),
+  base = z of the metric-identity RRF score 1/(3+r_main) + 0.6/(3+r_eng2) (not a rank of one list), window 40 then cut
+  to 25, z within formula group (ddof 1), GL_LAM 1.0; also reranks the PubChem list (z f.z + z ICE + z GL, top 25);
+  molecule score = mean entropy similarity over spectra. Stage order: main list -> PubChem rerank/merge/promotion ->
+  RRF with engine 2 (40) -> GLACIER rerank -> engine-2 top-1 to rank 2 -> neural RRF 0.25.
+- v51a = v47 with ice 0 / gl 1.0 (GLACIER alone): pushed, auto-submit after 09:05 JST 10-30 (pw_v51a.bat, wait_0905.ps1).
