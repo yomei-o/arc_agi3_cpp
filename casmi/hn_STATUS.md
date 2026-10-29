@@ -124,3 +124,16 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   v49 (v47 + PubChem rank-1 promotion) 0.361 = v47; the visible-test run promoted 0 of 400 queries, hidden unknown -> no
   LB effect at relp 3 / sp 6 / popp 5.
 - Running: v50a ice 1.0 / gl 0.5, v50b ice 1.0 / gl 1.5 (GL direction).
+- rr-form offline calibration (`cpp/glacier/fw_sweep3.py`, e2e work_v41 Python scores) vs LB:
+  | ice / gl | e2e hcqry | e2e hxqry | LB |
+  |---|---|---|---|
+  | 0.5 / 1.0 | +0.0086 | 0 | 0.356 |
+  | 1.0 / 1.0 | +0.0017 | -0.0014 | 0.361 |
+  | 2.0 / 1.0 | -0.0089 | -0.0034 | 0.343 |
+  | 3.0 / 1.0 | -0.0142 | -0.0162 | 0.338 |
+  | 1.0 / 0.5 | +0.0088 | -0.0007 | v50a |
+  | 1.0 / 1.5 | -0.0099 | -0.0026 | v50b |
+  | 0.75 / 0.75 | +0.0101 | -0.0003 | |
+  Direction agrees (heavy weights hurt) but the optimum is shifted (e2e 0.5, LB 1.0): e2e cannot fine-tune weights.
+- Truth position in the fused top 60 (e2e work_v44): hcqry rank 1: 167, 2-5: 131, 6-25: 48, 26-60: 10, absent 44;
+  hxqry 325 / 70 / 4 / 1 / 0 -> going deeper than 25 is worth at most ~2.5%; the lever is the order of the top 5.
