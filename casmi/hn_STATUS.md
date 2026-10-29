@@ -114,3 +114,9 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   (v44 0.348, v46b 0.338) loses on the LB although e2e put it first (+0.022 hcqry). The same-formula rr group form
   (v41c 0.355, v43 0.356) is the one that transfers. Build on make_v43_nb.py; judge its variants on the LB only.
   v45 (v43 + full ICE coverage) and v46 (CPU fallback) pending.
+
+## 2026-10-29
+- Overnight LB: v45 (v43 + full ICE coverage) 0.356 = v43 -> coverage is not the lever; v46 (fused, CPU) 0.347;
+  **v47 (v43 form, GPU, ice 1.0 / gl 1.0) 0.361 (best)** -> the ICEBERG weight is.
+- Running: v48a ice 2.0 / gl 1.0, v48b ice 3.0 / gl 1.0 (weight bracket); v49 = v47 + PubChem rank-1 promotion
+  (pcdet stats, relz > 3 or (S > 6 and pop >= 5), libSim < 0.9) as an LB probe of the step rejected offline.
