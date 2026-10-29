@@ -120,3 +120,7 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   **v47 (v43 form, GPU, ice 1.0 / gl 1.0) 0.361 (best)** -> the ICEBERG weight is.
 - Running: v48a ice 2.0 / gl 1.0, v48b ice 3.0 / gl 1.0 (weight bracket); v49 = v47 + PubChem rank-1 promotion
   (pcdet stats, relz > 3 or (S > 6 and pop >= 5), libSim < 0.9) as an LB probe of the step rejected offline.
+- LB: v48a (ice 2.0 / gl 1.0) 0.343, v48b (ice 3.0) 0.338 -> ICE weight peaks near 1.0 (0.5: 0.356, 1.0: 0.361).
+  v49 (v47 + PubChem rank-1 promotion) 0.361 = v47; the visible-test run promoted 0 of 400 queries, hidden unknown -> no
+  LB effect at relp 3 / sp 6 / popp 5.
+- Running: v50a ice 1.0 / gl 0.5, v50b ice 1.0 / gl 1.5 (GL direction).
