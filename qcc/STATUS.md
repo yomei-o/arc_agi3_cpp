@@ -25,3 +25,22 @@ Official verification of v1 running.
 
 Next ideas: single-bit normalization with a parity-addressed table (256 entries instead of 384, ~-86 Toffoli);
 narrower scratch with short-offset adders (Q -9, Toffoli +104); fewer phase rotations by rounding.
+
+## First submission (2026-11-02)
+sub1 = own invsqrt v3 + reference dqi + reference dfthcsos (zip 70 MB built on the build machine; the CLI submit
+returned 400, `KaggleApi.competition_submit` with the file named submission.zip worked). Expected GM ~(4.5)^(1/3).
+Leaderboard: score = geometric mean of cost_ref / cost over the three tasks. Public notebooks plateau at ~23.9 (they
+stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 qubits / 535k Toffolis, chemistry
+~10x at lambda 47, 428 qubits, 16k Toffolis); the top private entries are at ~28.
+
+## Benchmark III (dfthcsos) analysis
+- Reference reproduced on the build machine (C:\prog\qcc\verifiers, score 3.3556e9).
+- chem_cost.py: T_total / Q_total from (R, B, C, brot, J) with the verifier's formulas; reproduces the reference
+  exactly and the public best (9, 143, 40) at brot 8, J 5 (Q 428). brot <= 8 halves the inner-QROAM temporaries
+  (606 -> 303) because the verifier picks the QROAM size below beta (N - 1). The public ANGLES circuits cost ~316
+  Toffolis per batch against ~1361 for a plain QROM.
+- chem_spectrum.py: Eckart-Young bound on the shifted two-electron target supermatrix: error_2 <= 20 mHa needs at
+  least 290 rank-one terms (R*C), 330 for 10 mHa; negative-eigenvalue floor 0.3 mHa.
+- Group rank: each group spans at most min(B, C) independent X, so R * min(B, C) >= ~300.
+- Starter trainer (JAX CPU) runs at ~0.1 s/epoch for (9, 143, 40); seeded from the truncated reference it starts
+  at 8.7 Ha error -> needs a physics init (eigen-matrices grouped, per-group INDSCAL).
