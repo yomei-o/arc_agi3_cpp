@@ -64,3 +64,8 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   error_2 16.1 mHa unquantized, 18.6 at brot 12, 40.0 at 10, 155 at 8 (lambda_eff 54.5); the path tree is about
   2x worse. brot 8 (needed for the halved state-prep temporaries) therefore needs quantization-aware training: only
   the vectors u are quantized, the weights w stay continuous -> next: quantize u, re-fit w (and W_rho_c).
+- Quantization at brot 8 of the trained (9,143,40) (3000 epochs, unquantized 43.6 mHa): error_2 238 mHa.
+  chem_qrefit.py: re-fitting only the continuous weights w with the quantized u fixed: 238 -> 166 mHa (400 steps,
+  still slowly falling). Joint straight-through (STE) training of the angles + w made it worse (300 mHa; with a
+  10x smaller angle step 246 mHa): the 1/128 rounding grid makes STE oscillate. Next: drive the unquantized error far
+  lower first, then w-refit; or discrete coordinate descent on the angle words.
