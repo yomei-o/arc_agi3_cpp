@@ -69,3 +69,6 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   still slowly falling). Joint straight-through (STE) training of the angles + w made it worse (300 mHa; with a
   10x smaller angle step 246 mHa): the 1/128 rounding grid makes STE oscillate. Next: drive the unquantized error far
   lower first, then w-refit; or discrete coordinate descent on the angle words.
+- w-only refit run longer (2000 steps): plateaus at 163 mHa (lambda_H2 573 -> 499). The quantized vectors themselves
+  must change: discrete search on the angle words (coordinate descent / annealing per row) is the next step.
+- Overnight (9,143,40) at epoch 4000: unquantized error 43.1 mHa, lambda_eff 133.8 (falling fast; public 47).
