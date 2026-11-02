@@ -60,3 +60,7 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   prep over R*C*B = 90k entries costs 6.8k; best T*Q 6.15e6 vs public 6.95e6 (-12%). The cost map's optimum is
   many small groups (e.g. R 30, B 15, C 10: T*Q ~3.3e6 with plain QROM) - feasible only if 15 vectors per group
   can carry the accuracy; tonight's (30,15,10) and (20,30,15) runs test that.
+- Angle quantization of the reference factorization (chem_brot_sweep.py, starter brot_sweep), log-depth tree:
+  error_2 16.1 mHa unquantized, 18.6 at brot 12, 40.0 at 10, 155 at 8 (lambda_eff 54.5); the path tree is about
+  2x worse. brot 8 (needed for the halved state-prep temporaries) therefore needs quantization-aware training: only
+  the vectors u are quantized, the weights w stay continuous -> next: quantize u, re-fit w (and W_rho_c).
