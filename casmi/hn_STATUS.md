@@ -152,3 +152,5 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
 - User decision: no fusion with the public 0.468 notebook; own methods only.
 - Probes (all v47 + one change): v52 group base = z(ranker score + 0.15 pop) from ppdet (x1.0), v52b same x2.0,
   v53 base z(1/(rank+3)), v53b gated E2R2 (library top-1 at rank 2 when best >= 1.0; never LB-tested alone).
+- LB 11-02: **v53 base z(1/(rank+3)) 0.365 (best)**, v52 score base x1 0.363, v52b x2 0.360, v53b gated E2R2 0.361 (= v47, no effect).
+  The base-curve shape is the live axis (flatter top -> forward models decide ranks 1-3). v54 = base 1/(rank+6) queued.
