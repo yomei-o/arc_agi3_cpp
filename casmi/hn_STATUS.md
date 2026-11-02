@@ -144,3 +144,11 @@ v44: e2e +0.013 hcqry became only +0.003 on LB (holdout gain does not transfer 1
   molecule score = mean entropy similarity over spectra. Stage order: main list -> PubChem rerank/merge/promotion ->
   RRF with engine 2 (40) -> GLACIER rerank -> engine-2 top-1 to rank 2 -> neural RRF 0.25.
 - v51a = v47 with ice 0 / gl 1.0 (GLACIER alone): pushed, auto-submit after 09:05 JST 10-30 (pw_v51a.bat, wait_0905.ps1).
+
+## 2026-11-02
+- LB: v50a (ice 1.0 / gl 0.5) 0.360, v50b (ice 1.0 / gl 1.5) 0.355, v51a (GLACIER alone, ice 0 / gl 1.0) 0.353.
+  With v47 (1.0 / 1.0) 0.361, v48a/b and v43 the rr-base weights sit at their optimum; GLACIER-alone (the 0.468
+  notebook's choice) does not carry over to our base list. Weight tuning is done.
+- User decision: no fusion with the public 0.468 notebook; own methods only.
+- Probes (all v47 + one change): v52 group base = z(ranker score + 0.15 pop) from ppdet (x1.0), v52b same x2.0,
+  v53 base z(1/(rank+3)), v53b gated E2R2 (library top-1 at rank 2 when best >= 1.0; never LB-tested alone).
