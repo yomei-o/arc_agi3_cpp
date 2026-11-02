@@ -53,3 +53,10 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   reference seed 4.8 Ha after 200 epochs.
 - Overnight (night_chem1.bat, build machine C:\prog\casmi\night\night_chem1.log): (9,143,40) 40k epochs, then
   inits + 40k epochs for (20,30,15) and (30,15,10) to test whether a short angle table is feasible.
+- ANGLE deltas of the reference are dense (0.1% zero words at brot 12, 1.3% at brot 8, every 5-word delta row
+  nonzero), so pruned unary iteration gives nothing on generic factorizations (chem_angle_sparsity.py,
+  chem_angle_coarse.py); sparsity or shared rows would have to be designed into the factorization.
+- Shared-basis THC (R = 1, B >= 300 by the rank bound): ANGLES drop to ~3.7k Toffolis (L = 376) but the inner state
+  prep over R*C*B = 90k entries costs 6.8k; best T*Q 6.15e6 vs public 6.95e6 (-12%). The cost map's optimum is
+  many small groups (e.g. R 30, B 15, C 10: T*Q ~3.3e6 with plain QROM) - feasible only if 15 vectors per group
+  can carry the accuracy; tonight's (30,15,10) and (20,30,15) runs test that.
