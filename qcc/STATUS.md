@@ -44,3 +44,12 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
 - Group rank: each group spans at most min(B, C) independent X, so R * min(B, C) >= ~300.
 - Starter trainer (JAX CPU) runs at ~0.1 s/epoch for (9, 143, 40); seeded from the truncated reference it starts
   at 8.7 Ha error -> needs a physics init (eigen-matrices grouped, per-group INDSCAL).
+- Benchmark I v1 passed the full official verification (200M shots, 2865 s single process): score 635,569.
+- Physics init (chem_init.py): eigen-matrices of the target grouped 9 x 40 + per-group INDSCAL with mu*lambda_H2
+  penalty: error_2 492 mHa, lambda_H2 847 (without the penalty 833 mHa but the trainer blew lambda to 2.3e5).
+  Ideal lambda_H2 of the exact eigen-matrices is 566, the reference's whole Lambda is 308: lambda depends on the
+  gauge (orthogonal mixing of all terms), not only on the eigen-decomposition.
+- Trainer from that init, (9,143,40), 3000 epochs: error 43.6 mHa, lambda_eff 316 (still falling) vs the truncated
+  reference seed 4.8 Ha after 200 epochs.
+- Overnight (night_chem1.bat, build machine C:\prog\casmi\night\night_chem1.log): (9,143,40) 40k epochs, then
+  inits + 40k epochs for (20,30,15) and (30,15,10) to test whether a short angle table is feasible.
