@@ -98,3 +98,7 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   official verify). End-to-end FAIL only on error_2 (test table at 190 mHa).
 - Plain QROM: J = 13 at brot 8 is best (cap 125): (9,143,40) ~5.9x at lambda_eff 50; (9,143,60) ~5.5x but
   R*C = 540 gives slack for the rounding noise -> switched the fit to (9,143,60) (day2_gpu2).
+- (9,143,60) GPU L-BFGS: 24.0 / 20.8 / 19.7 / 19.2 / 18.9 / 18.88 mHa over 6 x 8k iterations (stall). Not an fp32
+  issue (chem_prec.py: fp32 and fp64 agree to 0.1 uHa). Adam with a cosine lr (chem_adam.py, ~9 ms/step) escapes:
+  18.88 -> 18.23 in 4k steps; 150k-step run launched, then the rounding pipeline (pipe_c60b).
+- invsqrt: truncation-bias compensation does not allow narrower registers (WY 28: 2^-24.1 with or without it).
