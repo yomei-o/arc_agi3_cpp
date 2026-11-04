@@ -73,7 +73,7 @@ for i in range(steps + 1):
     pen = 1e7 * torch.relu(e2 - etgt) ** 2 + 1e4 * torch.relu(GAP_FLOOR + 0.002 - gap) ** 2
     (leff + pen).backward()
     opt.step()
-    ok = e2.item() <= etgt and gap.item() > GAP_FLOOR + 0.001
+    ok = ("wonly" in MODES or e2.item() <= etgt) and gap.item() > GAP_FLOOR + 0.001  # wonly: error_2 is fixed
     if ok and (best is None or leff.item() < best[0]):
         best = (leff.item(), w.detach().clone(), Wn.detach().clone())
     if i % max(1, steps // 10) == 0:
