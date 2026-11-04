@@ -87,3 +87,14 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   Note: H2_I in the npz stores w_B = W + sum_b w (verify.native_inputs); the starter kit's evaluator reports a
   different Lambda, so chem_eval.py now uses the official dfthcsos.verify.
 - Consequence: lambda can be recovered after training, so train for the error only (rho 1e-6) -> day2_chem2.
+- Public chemistry method (read the notebook text only, user-approved; code written here independently): compact
+  seed (pivoted Cholesky leaves + balanced k-means on orbital profiles + OMP vectors), long L-BFGS (A100 hours),
+  progressive rounding with L-BFGS stages, gauge + constrained lambda refit, one-body word polish, compressed loaders.
+- GPU pipeline on the build machine's RTX 3090 (system Python, torch 2.6 cu124), all own code:
+  chem_gpu.py (seed: 754.8 mHa at (9,143,40), 17.1 orbitals/group; L-BFGS fit: 29.0 / 26.7 / 25.9 mHa after
+  10k / 20k / 30k iterations - beats the CPU trainer's 34 after 40k epochs), chem_round.py (progressive rounding),
+  chem_lamfit.py (offsets-only lambda_eff refit: 1273 -> 57.7 at unchanged error_2; LS offset init),
+  chem_build.py (one-body words polished by coordinate descent: error_1 55 -> 13.2 mHa; plain QROM circuits;
+  official verify). End-to-end FAIL only on error_2 (test table at 190 mHa).
+- Plain QROM: J = 13 at brot 8 is best (cap 125): (9,143,40) ~5.9x at lambda_eff 50; (9,143,60) ~5.5x but
+  R*C = 540 gives slack for the rounding noise -> switched the fit to (9,143,60) (day2_gpu2).
