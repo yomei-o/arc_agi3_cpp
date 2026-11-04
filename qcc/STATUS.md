@@ -72,3 +72,18 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
 - w-only refit run longer (2000 steps): plateaus at 163 mHa (lambda_H2 573 -> 499). The quantized vectors themselves
   must change: discrete search on the angle words (coordinate descent / annealing per row) is the next step.
 - Overnight (9,143,40) at epoch 4000: unquantized error 43.1 mHa, lambda_eff 133.8 (falling fast; public 47).
+
+## 2026-11-04
+- Overnight: (9,143,40) 40k epochs from the physics init: unquantized error_2 34.1 mHa (plateau; lower lr 2e-4 did not
+  move it). (20,30,15) plateau 322 mHa, (30,15,10) 896 mHa: small groups cannot carry the accuracy (negative result;
+  each group needs ~100+ vectors).
+- First submission scored 1.65362 (= (4.5)^(1/3), as expected).
+- Discrete coordinate descent on the brot-8 words (chem_qcd.py): every single-word move is rejected (one word
+  = pi/128 overshoots the valley); all gain came from re-fitting w (185 -> 122 mHa). Quantization noise is not
+  removable word by word.
+- **Gauge (chem_gauge.py)**: per group an orthogonal C x C mixing of the leaves changes only lambda_H2 (error,
+  E_SOS, words untouched). On the 40k factorization: lambda_H2 733.5 -> 352.7, official Lambda ~745 -> 364.9,
+  lambda_eff ~76 -> 53.40 (public best 47.04), error_2 unchanged 36.29 mHa at brot 12.
+  Note: H2_I in the npz stores w_B = W + sum_b w (verify.native_inputs); the starter kit's evaluator reports a
+  different Lambda, so chem_eval.py now uses the official dfthcsos.verify.
+- Consequence: lambda can be recovered after training, so train for the error only (rho 1e-6) -> day2_chem2.
