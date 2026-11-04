@@ -102,3 +102,9 @@ stack each other's circuits: invsqrt ~20x at 62-101 qubits, dqi ~64x at 883-892 
   issue (chem_prec.py: fp32 and fp64 agree to 0.1 uHa). Adam with a cosine lr (chem_adam.py, ~9 ms/step) escapes:
   18.88 -> 18.23 in 4k steps; 150k-step run launched, then the rounding pipeline (pipe_c60b).
 - invsqrt: truncation-bias compensation does not allow narrower registers (WY 28: 2^-24.1 with or without it).
+
+## 2026-11-04 midday handoff
+- adam_60a (9,143,60): Adam 150k -> error_2 11.81 mHa unquantized.
+- pipe_c60b (40 stages x 1500) running: error_2 12.69 mHa at 81% frozen (12:34). Result in C:\prog\casmi\night\pipe_c60b.log, build in C:\prog\qcc\build_c60b.
+- Night chain night2_chain.bat (pid 6960): waits for c60b, then Adam 400k (lr 2e-4) -> adam_60b, then pipeline 60 x 2000 -> build_c60c.
+- If verify PASS: qcc_submit.py own_v3.kmb sub1\dqi.kmb build_c60x "<msg>" (--dry first). Not auto-submitted.
